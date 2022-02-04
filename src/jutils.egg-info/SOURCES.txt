@@ -8,3 +8,7 @@ src/jutils.egg-info/dependency_links.txt
 src/jutils.egg-info/top_level.txt
 src/nnutils/__init__.py
 src/nnutils/example.py
+src/nnutils/geom_utils.py
+src/nnutils/image_utils.py
+src/nnutils/layers.py
+src/nnutils/mesh_utils.py
