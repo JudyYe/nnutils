@@ -12,3 +12,5 @@ src/nnutils/geom_utils.py
 src/nnutils/image_utils.py
 src/nnutils/layers.py
 src/nnutils/mesh_utils.py
+src/nnutils/slurm_utils.py
+src/nnutils/web_utils.py

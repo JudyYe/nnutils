@@ -49,6 +49,15 @@ from nnutils.layers import grid_sample
 
 
 # ### Mesh IO Utils ###
+def meshfile_to_glb(mesh_file, out_file):
+    mesh = trimesh.load(mesh_file)  
+    if not out_file.endswith('.glb'):
+        out_file += '.glb'
+    os.makedirs(osp.dirname(out_file), exist_ok=True)
+    mesh.export(file_type="glb", file_obj=out_file)  
+    print('export to ', mesh)
+
+
 def as_mesh(scene_or_mesh):
     """
     Convert a possible scene to a mesh.
