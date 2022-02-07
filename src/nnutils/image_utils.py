@@ -18,6 +18,30 @@ from torchvision import transforms
 from PIL import Image
 
 
+def crop_weak_cam(cam, bbox_topleft, oldo2n, 
+    new_center, new_size, old_size=224, resize=224):
+    """
+    Args:
+        cam ([type]): [description]
+        bbox_topleft ([type]): [description]
+        scale ([type]): [description]
+        new_bbox ([type]): [description] 
+    """
+    s, t = np.split(cam, [1, ], -1)
+    prev_center = bbox_topleft + (old_size / 2) / oldo2n
+    offset = (prev_center - new_center)
+
+    newo2n = resize/new_size
+    
+    t += offset / (new_size / 2) / s  * oldo2n
+    s *=  newo2n / oldo2n
+    new_cam = np.concatenate([s, t], -1)
+
+    new_tl = new_center - new_size / 2
+    new_scale = newo2n
+    return new_cam, new_tl, new_scale
+
+
 def ndc_to_screen_intr(cam, H, W):
     max_size = max(H, W)
     min_size = min(H, W)
@@ -70,11 +94,19 @@ def jitter_bbox(bbox, s_stdev, t_stdev):
 
 
 def square_bbox(bbox, pad=0):
+    if not torch.is_tensor(bbox):
+        is_numpy = True
+        bbox = torch.FloatTensor(bbox)
+    else:
+        is_numpy = False
+
     x1y1, x2y2 = bbox[..., :2], bbox[..., 2:]
     center = (x1y1 + x2y2) / 2 
     half_w = torch.max((x2y2 - x1y1) / 2, dim=-1)[0]
     half_w = half_w * (1 + 2 * pad)
     bbox = torch.cat([center - half_w, center + half_w], dim=-1)
+    if is_numpy:
+        bbox = bbox.cpu().detach().numpy()
     return bbox
 
 
@@ -138,7 +170,7 @@ def frank_pad_and_resize(img, hand_bbox, add_margin=True, final_size=224):
     return ratio, np.array(bbox_processed)
 
 
-def crop_resize(img: np.ndarray, bbox, final_size=224, pad='constant', return_np=True):
+def crop_resize(img: np.ndarray, bbox, final_size=224, pad='constant', return_np=True, **kwargs):
     # todo: joint effect
     ndim = img.ndim
     img_y, img_x = img.shape[0:2]
@@ -150,8 +182,7 @@ def crop_resize(img: np.ndarray, bbox, final_size=224, pad='constant', return_np
     pad_dim = ((pad_y1, pad_y2), (pad_x1, pad_x2), )
     if ndim == 3:
         pad_dim += ((0, 0), )
-    # print(pad_dim)
-    img = np.pad(img, pad_dim, mode=pad)
+    img = np.pad(img, pad_dim, mode=pad, **kwargs)
 
     min_x += pad_x1
     max_x += pad_x1
@@ -550,8 +581,8 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False):
             time_slices = tensor_text_to_canvas(tensor_list[t], batch_text[t], col=col,
                                                 scale=scale)  # numpy (H, W, C) of uint8
             image_list.append(time_slices)
-        write_mp4(image_list, gif_name)
-        # write_gif(image_list, gif_name)
+        # write_mp4(image_list, gif_name)
+        write_gif(image_list, gif_name)
 
     def write_gif(image_list, gif_name):
         if not os.path.exists(os.path.dirname(gif_name)):
