@@ -10,7 +10,7 @@ import shutil
 from flask_table import Table, Col, create_table
 from flask import Markup
 import argparse
-from nnutils import mesh_utils
+from . import mesh_utils
 
 
 def parse_args():

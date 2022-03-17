@@ -18,25 +18,38 @@ from torchvision import transforms
 from PIL import Image
 
 
-def mask_to_bbox(mask):
+def mask_to_bbox(mask, mode='minmax', rate=1):
     """
     Args:
         mask (H, W)
     """
     h_idx, w_idx = np.where(mask > 0)
-    y1, y2 = h_idx.min(), h_idx.max()
-    x1, x2 = w_idx.min(), w_idx.max()
+    if len(h_idx) == 0:
+        return np.array([0, 0, 0, 0])
+
+    if mode == 'minmax':
+        y1, y2 = h_idx.min(), h_idx.max()
+        x1, x2 = w_idx.min(), w_idx.max()
+    elif mode == 'com':
+        y_c, x_c = h_idx.mean(), w_idx.mean()
+        y_l, x_l = h_idx.std(), w_idx.std()
+
+        x1, y1 = x_c - x_l, y_c - y_l
+        x2, y2 = x_c + x_l, y_c + y_l
+    elif mode == 'med':
+        h_idx, w_idx = np.sort(h_idx), np.sort(w_idx)
+
+        idx25 = len(h_idx) // 4
+        idx75 = len(h_idx) * 3 // 4
+        y_c, x_c = h_idx[len(h_idx) // 2], w_idx[len(w_idx) // 2]
+        y_l, x_l = h_idx[idx75] - h_idx[idx25], w_idx[idx75] - w_idx[idx25]
+
+        x1, y1 = x_c - rate*x_l, y_c - rate*y_l
+        x2, y2 = x_c + rate*x_l, y_c + rate*y_l
+
     return np.array([x1, y1, x2, y2])
 
-def joint_bbox(*bboxes):
-    bboxes = np.array(bboxes)
-    x1 = bboxes[:, 0].min()
-    y1 = bboxes[:, 1].min()
-    x2 = bboxes[:, 2].max()
-    y2 = bboxes[:, 3].max()
-    return np.array([x1, y1, x2, y2])
 
-    
 def crop_weak_cam(cam, bbox_topleft, oldo2n, 
     new_center, new_size, old_size=224, resize=224):
     """
@@ -46,14 +59,16 @@ def crop_weak_cam(cam, bbox_topleft, oldo2n,
         scale ([type]): [description]
         new_bbox ([type]): [description] 
     """
+    cam = cam.copy()
     s, t = np.split(cam, [1, ], -1)
     prev_center = bbox_topleft + (old_size / 2) / oldo2n
     offset = (prev_center - new_center)
 
     newo2n = resize/new_size
     
-    t += offset / (resize / 2) / s  * oldo2n
-    s *=  newo2n / oldo2n
+    # t += offset / (resize / 2) / s  * oldo2n
+    s *=  newo2n / oldo2n * old_size / resize
+    t += 2 *  newo2n * offset / resize / s
     new_cam = np.concatenate([s, t], -1)
 
     new_tl = new_center - new_size / 2
@@ -602,14 +617,6 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False):
             image_list.append(time_slices)
         # write_mp4(image_list, gif_name)
         write_gif(image_list, gif_name)
-
-    def write_gif(image_list, gif_name):
-        if not os.path.exists(os.path.dirname(gif_name)):
-            os.makedirs(os.path.dirname(gif_name))
-            print('## Make directory: %s' % gif_name)
-        imageio.mimsave(gif_name + '.gif', image_list)
-        print('save to ', gif_name + '.gif')
-
     # merge write
     if len(image_list) == 0:
         print('not save empty gif list')
@@ -622,6 +629,14 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False):
             os.makedirs(fname, exist_ok=True)
             single_list = [each[n:n+1] for each in image_list]
             write_to_gif(os.path.join(fname, '%d' % n), single_list, [text_list[n]], col=1, scale=scale)
+
+
+def write_gif(image_list, gif_name):
+    if not os.path.exists(os.path.dirname(gif_name)):
+        os.makedirs(os.path.dirname(gif_name))
+        print('## Make directory: %s' % gif_name)
+    imageio.mimsave(gif_name + '.gif', image_list)
+    print('save to ', gif_name + '.gif')
 
 
 def write_mp4(video, save_file):
