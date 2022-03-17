@@ -77,12 +77,14 @@ def se3_to_axis_angle_t(param: torch.Tensor):
     return axisang, trans, scale
 
 
-def axis_angle_t_to_matrix(axisang, t=None, s=None, homo=True):
+def axis_angle_t_to_matrix(axisang=None, t=None, s=None, homo=True):
     """
     :param axisang: (N, 3)
     :param t: (N, 3)
     :return: (N, 4, 4)
     """
+    if axisang is None:
+        axisang = torch.zeros_like(t)
     if t is None:
         t = torch.zeros_like(axisang)
     rot = rot_cvt.axis_angle_to_matrix(axisang)
@@ -110,7 +112,7 @@ def rt_to_homo(rot, t=None, s=None):
     :param rot: (..., 3, 3)
     :param t: (..., 3 ,(1))
     :param s: (..., 1)
-    :return: (N, 4, 4) [R, t; 0, 1]
+    :return: (N, 4, 4) [R, t; 0, 1] sRX + t
     """
     rest_dim = list(rot.size())[:-2]
     if t is None:

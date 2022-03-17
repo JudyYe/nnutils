@@ -3,12 +3,14 @@
 # --------------------------------------------------------
 from __future__ import print_function
 
+import logging
 import functools
 import os
 import os.path as osp
 import pickle
 import time
 from typing import List, Tuple, Union, Callable
+from xml.dom import InvalidModificationErr
 from joblib.parallel import Parallel, delayed
 from numpy.lib.arraysetops import isin
 from pytorch3d.renderer.blending import softmax_rgb_blend
@@ -44,8 +46,8 @@ from pytorch3d.renderer import (
     NDCGridRaysampler, EmissionAbsorptionRaymarcher, ImplicitRenderer, MonteCarloRaysampler, mesh)
 from trimesh.base import Trimesh
 from trimesh.voxel.base import VoxelGrid
-from nnutils import image_utils, geom_utils
-from nnutils.layers import grid_sample
+from . import image_utils, geom_utils
+from .layers import grid_sample
 
 
 # ### Mesh IO Utils ###
@@ -155,7 +157,7 @@ def dump_voxes(filepath, voxels):
         np.savez_compressed(filepath[n] + '.npz', vox=voxels[n, 0])
 
 
-def dump_meshes(mesh_path, meshes: Meshes):
+def dump_meshes(mesh_path, meshes: Meshes, ext='.obj'):
     """
     :param mesh_path: str or list of str
     :param meshes:
@@ -177,18 +179,13 @@ def dump_meshes(mesh_path, meshes: Meshes):
         return
 
     print('save meshes to ', mesh_path[0])
-    def save_one(mesh_path, vert, face):
-        os.makedirs(os.path.dirname(mesh_path), exist_ok=True)
-        io3d.save_obj(mesh_path + '.obj', vert, face)
 
-    # Parallel(8, verbose=5)(
-    #     delayed(save_one)(mesh_path[n], verts[n], faces[n])
-    #     for n in range(N)
-    # )
     for n in range(N):
         os.makedirs(os.path.dirname(mesh_path[n]), exist_ok=True)
-        io3d.save_obj(mesh_path[n] + '.obj', verts[n], faces[n])
-
+        if ext == '.obj':
+            io3d.save_obj(mesh_path[n] + ext, verts[n], faces[n])
+        else:
+            io3d.save_ply(mesh_path[n] + ext, verts[n], faces[n])
 
 def trans_coord(meshes: Meshes, rad=-np.pi / 2, axis='X'):
     """
@@ -229,7 +226,8 @@ def load_mesh_from_np(vertices, faces, device='cpu', scale_rgb=255, texture=None
 
 
 
-def pad_texture(meshes: Meshes, feature: torch.Tensor=None) -> TexturesVertex:
+
+def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex:
     """
     :param meshes:
     :param feature: (sumV, C)
@@ -237,8 +235,20 @@ def pad_texture(meshes: Meshes, feature: torch.Tensor=None) -> TexturesVertex:
     """
     if isinstance(feature, TexturesVertex):
         return feature
-    if feature is None:
+    if feature == 'white':
         feature = torch.ones_like(meshes.verts_padded())
+    elif feature == 'blue':
+        feature = torch.zeros_like(meshes.verts_padded())
+        color = torch.FloatTensor([[[203,238,254]]]).to(meshes.device)  / 255   
+        color = torch.FloatTensor([[[183,216,254]]]).to(meshes.device)  / 255   
+        feature = feature + color
+    elif feature == 'yellow':
+        feature = torch.zeros_like(meshes.verts_padded())
+        # yellow = [250 / 255.0, 230 / 255.0, 154 / 255.0],        
+        color = torch.FloatTensor([[[250 / 255.0, 230 / 255.0, 154 / 255.0]]]).to(meshes.device) * 2 - 1
+        feature = feature + color
+    elif feature == 'random':
+        feature = torch.rand_like(meshes.verts_padded())  # [0, 1]
     if feature.dim() == 2:
         feature = struct_utils.packed_to_list(feature, meshes.num_verts_per_mesh().tolist())
         # feature = struct_utils.list_to_padded(feature, pad_value=-1)
@@ -389,7 +399,8 @@ def pc_to_cubic_meshes(xyz: torch.Tensor = None, feature: torch.Tensor = None, p
 
         norm = torch.sqrt(torch.sum(pc.points_padded() ** 2, dim=-1, keepdim=True))
         std = torch.std(norm, dim=1, keepdim=True)  # (N, V, 3)
-        eps = (std / 10).clamp(min=5e-3)  # N, 1, 1
+        if eps is None:
+            eps = (std / 10).clamp(min=5e-3)  # N, 1, 1
         # eps = .1
 
         cube_verts, cube_faces = create_cube(device, align=align)
@@ -469,6 +480,76 @@ def transform_points(cPoints, cameras:PerspectiveCameras, cTw=None):
     ndcPoints = ndcTc.transform_points(cPoints)[..., :2]
     return ndcPoints
 
+def render_mesh_flow(wMeshes, cam1: PerspectiveCameras, cam2: PerspectiveCameras,
+        return_ndc=True, **kwargs):
+    """
+    Args:
+        wmeshes (_type_): _description_
+        c1Tw (_type_): view transform in shape of (N, 4, 4)
+        c2Tw (_type_): view transform of next frame (N, 4, 4)
+    Returns:
+        flow1 to 2: N, H, W, 2 in pixel space
+    """
+    image_size = kwargs.get('out_size', 224)
+    c1Tw = kwargs.get('c1Tw', None)
+    c2Tw = kwargs.get('c2Tw', None)
+    raster_settings = kwargs.get('raster_settings',
+                                 RasterizationSettings(
+                                     image_size=image_size, 
+                                     faces_per_pixel=1,
+                                    perspective_correct=False,
+                                     cull_backfaces=False))
+    device = cam1.device
+
+    rasterizer = MeshRasterizer(cameras=cam1, raster_settings=raster_settings).to(device)
+    if c1Tw is not None:
+        cam1Meshes = apply_transform(wMeshes, c1Tw)
+    else:
+        cam1Meshes = wMeshes
+    out = {}
+    fragments = rasterizer(cam1Meshes, **kwargs)
+
+    # unproject and reproject
+    zbuf = fragments.zbuf[..., 0]  # (N, H, W, 1)
+    N, H, W = zbuf.size()
+
+    # flipped image
+    ys, xs = torch.meshgrid(
+        torch.linspace(1, -1, H),
+        torch.linspace(1, -1, W)
+    )  # (H, W)
+    ys = ys.unsqueeze(0).expand(N, H, W).to(device)
+    xs = xs.unsqueeze(0).expand(N, H, W).to(device)
+    i1Xy = torch.stack([xs, ys], -1)
+
+    cam1Xyz = unproj_depth_to_xyz(zbuf, cam1, scale=False, xy=i1Xy)
+    if c1Tw is not None:
+        wXyz = apply_transform(cam1Xyz, geom_utils.inverse_rt(mat=c1Tw, return_mat=True))
+    else:
+        wXyz = cam1Xyz
+
+    if c2Tw is not None:
+        c2Xyz = apply_transform(wXyz, c2Tw)
+    else:
+        c2Xyz = wXyz
+
+    i2Xy = cam2.transform_points_ndc(c2Xyz.view(N, H*W, 3))[..., :2].view(N, H, W, 2)
+    invalid_mask = zbuf == -1
+    flow12 = i2Xy - i1Xy
+    flow12[invalid_mask] = 0
+
+    flow12 = torch.flip(flow12, dims=[1, 2])  # flip up-down, and left-right
+    invalid_mask = torch.flip(invalid_mask.float(), dims=[1, 2]).bool()
+    wXyz = torch.flip(wXyz, [1, 2])
+    i2Xy = torch.flip(i2Xy, [1, 2])
+    if not return_ndc:
+        # flow12 += 1
+        flow12 *= image_size / 2
+    out['flow'] = flow12
+    out['wXyz'] = wXyz  # (N, H, W, 3)
+    out['invalid_mask'] = invalid_mask  # (N, H, W, K)
+    return out
+
 
 def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwargs):
     """
@@ -479,9 +560,10 @@ def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwar
     :param kwargs:
     :return: 'rgb': (N, 3, H, W). 'mask': (N, 1, H, W). 'rgba': (N, 3, H, W)
     """
+    image_size = kwargs.get('out_size', 224)
     raster_settings = kwargs.get('raster_settings',
                                  RasterizationSettings(
-                                     image_size=kwargs.get('out_size', 224), 
+                                     image_size=image_size, 
                                      faces_per_pixel=2,
                                      cull_backfaces=False))
     device = cameras.device
@@ -632,6 +714,28 @@ def render_geom(geom: Union[Meshes, Pointclouds], azel=[[0, 0]], scale_geom=Fals
     image = render(geom, view_cameras, **kwargs)
     return image
 
+
+def center_norm_geom(geom,  dist=20, max_norm=1):
+    """center to 0,0,0, with -1, 1? """
+    device = geom.device
+    N = len(geom)
+    verts = get_verts(geom)  # N, V, 3 --> N, 1, 3
+
+    bbnx_max = torch.max(verts, dim=1, keepdim=False)[0]  # (N, 3)
+    bbnx_min = torch.min(verts, dim=1, keepdim=False)[0]  # (N, 3)
+
+    width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N, 1, 1)
+    scale = Scale(2 * max_norm / width, device=device)
+    geom_norm = apply_transform(geom, scale)
+    
+    center = (bbnx_max + bbnx_min) /2 * 2 / width
+    trans = Translate(-center, device=device)
+
+    cGeom = apply_transform(geom_norm, trans)
+    
+    transfm = scale.compose(trans)
+
+    return cGeom, transfm
 
 def render_geom_rot(geom: Union[Meshes, Pointclouds],
                     view_mod='az', scale_geom=False, 
@@ -893,7 +997,7 @@ def xyz_to_pc(cXyz, image: torch.Tensor = None, mask: torch.Tensor = None, retur
         return xyz, color
 
 
-def depth_to_pc(depth, image: torch.Tensor, cameras, mask=None, scale=False, return_pc=True) -> Pointclouds:
+def depth_to_pc(depth, image: torch.Tensor=None, cameras=None, mask=None, scale=False, return_pc=True) -> Pointclouds:
     """
     :param depth: (N, H, W)
     :param image: (N, C, H, W)
@@ -915,6 +1019,67 @@ def depth_to_pc(depth, image: torch.Tensor, cameras, mask=None, scale=False, ret
 
 
 # ######## Camera utils ########
+def weak_to_full_persp(f, pp, scale, trans):
+    """
+    Args:
+        f ([type]): (N, (1))
+        pp ([type]): [description]
+        scale ([type]): [description]
+        trans ([type]): [description]
+    Returns:
+        (X,Y,Z) + (px / scale, py / scale, f / scale)  (N, 3)
+    """
+    if f.ndim == 1:
+        f = f.unsqueeze(-1)
+    if f.size(-1) == 2:
+        f = f[..., 0:1]
+        logging.warn('does not support fx fy')
+    if scale.ndim == 1:
+        scale = scale.unsqueeze(-1)
+
+    # trans = torch.cat([trans - pp, f], dim=-1)  # N, 3
+    # trans = trans / scale  # N, 3
+    translate = torch.cat([trans - pp / scale, f / scale], -1)
+    return translate
+
+def intr_from_ndc_to_screen(ndc_intr, H, W):
+    """-1, 1 --> 0, H, it's essentially affine transformation.... 
+    """
+    N = len(ndc_intr)
+    device = ndc_intr.device
+    scale_mat = torch.FloatTensor([[
+        [W/2, 0, W/2, 0],
+        [0, H/2, H/2, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
+    ]]).to(device).repeat(N, 1, 1)
+    pix_intr = scale_mat @ ndc_intr
+    return pix_intr
+
+
+def intr_from_screen_to_ndc(pix_intr, H, W):
+    """0,H --> -1, 1"""
+    N = len(pix_intr)
+    device = pix_intr.device
+    scale_mat = torch.FloatTensor([[
+        [2/W, 0, -1, 0],
+        [0, 2/H, -1, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
+    ]]).to(device).repeat(N, 1, 1)
+    ndc_intr = scale_mat @ pix_intr
+    return ndc_intr
+
+
+def get_fxfy_pxpy(K):
+    fx = K[..., 0, 0]
+    fy = K[..., 1, 1]
+    px = K[..., 0, 2]
+    py = K[..., 1, 2]
+    f = torch.stack([fx, fy], -1)
+    p = torch.stack([px, py], -1)
+    return f, p
+
 
 def weak2full_perspective(meshes: Meshes, scale, trans, dst_camera: PerspectiveCameras):
     """
@@ -982,6 +1147,21 @@ def f_to_K(f):
     K = torch.diag_embed(diag, )
     return K
 
+def get_camera_dist(cTw=None, wTc=None):
+    """
+    Args:
+        cTw (N, 4, 4) extrinsics
+
+    Returns:
+        (N, )
+    """
+    if wTc is None:
+        wTc = geom_utils.inverse_rt(mat=cTw, return_mat=True)
+    cam_norm = wTc[..., 0:4, 3]
+    cam_norm = cam_norm[..., 0:3] / cam_norm[..., 3:4]  # (N, 3)
+    norm = torch.norm(cam_norm, dim=-1)
+    return norm
+    
 def get_camera_f_p(cameras: PerspectiveCameras):
     """(N, ), (N, 2)"""
     proj = cameras.get_projection_transform().get_matrix()
@@ -1122,6 +1302,8 @@ def join_scene(mesh_list: List[Meshes]) -> Meshes:
     for m, mesh in enumerate(mesh_list):
         v_list.append(mesh.verts_list())
         f_list.append(mesh.faces_list())
+        if mesh.textures is None:
+            mesh.textures = pad_texture(mesh)
         t_list.append(mesh.textures.verts_features_list())
         N = len(mesh)
 
@@ -1147,7 +1329,7 @@ def expand_meshes(meshes: Meshes, N):
     assert len(meshes) == 1
     
 
-def join_scene_w_labels(mesh_list: List[Meshes], num_classes) -> Meshes:
+def join_scene_w_labels(mesh_list: List[Meshes], num_classes=3) -> Meshes:
     assert len(mesh_list) <= num_classes
     for m, mesh in enumerate(mesh_list):
         N = len(mesh)
