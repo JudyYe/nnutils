@@ -16,7 +16,7 @@ from numpy.lib.arraysetops import isin
 from pytorch3d.renderer.blending import softmax_rgb_blend
 from pytorch3d.renderer.lighting import PointLights
 from pytorch3d.renderer.materials import Materials
-from pytorch3d.renderer.mesh.shader import HardPhongShader, HardFlatShader
+from pytorch3d.renderer.mesh.shader import HardPhongShader, HardFlatShader, SoftPhongShader
 from pytorch3d.renderer.mesh.shading import flat_shading
 import skimage.measure
 
@@ -223,8 +223,6 @@ def load_mesh_from_np(vertices, faces, device='cpu', scale_rgb=255, texture=None
 
     mesh = Meshes([verts], [faces], texture)
     return mesh
-
-
 
 
 def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex:
@@ -574,8 +572,8 @@ def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwar
     out['frag'] = fragments
 
     if rgb_mode:
-        # shader = SoftFlatShader(device=meshes.device, lights=ambient_light(meshes.device, cameras))
-        shader = HardGouraudShader(device=meshes.device, lights=ambient_light(meshes.device, cameras))
+        # shader = HardGouraudShader(device=meshes.device, lights=ambient_light(meshes.device, cameras))
+        shader = HardPhongShader(device=meshes.device, lights=ambient_light(meshes.device, cameras))
         image = shader(fragments, meshes, cameras=cameras, )  # znear=znear, zfar=zfar, **kwargs)
         rgb, _ = flip_transpose_canvas(image)
 
@@ -627,7 +625,8 @@ def render_soft(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwar
     out['frag'] = fragments
 
     if rgb_mode:
-        shader = SoftGouraudShader(device, lights=ambient_light(meshes.device, cameras))
+        # shader = SoftGouraudShader(device, lights=ambient_light(meshes.device, cameras))
+        shader = SoftPhongShader(device, lights=ambient_light(meshes.device, cameras))
         if torch.isnan(fragments.zbuf).any():
             fname = '/checkpoint/yufeiy2/hoi_output/vis/mesh.pkl'
             os.makedirs(os.path.dirname(fname), exist_ok=True)
@@ -1302,7 +1301,7 @@ def join_scene(mesh_list: List[Meshes]) -> Meshes:
     for m, mesh in enumerate(mesh_list):
         v_list.append(mesh.verts_list())
         f_list.append(mesh.faces_list())
-        if mesh.textures is None:
+        if mesh.textures is None or isinstance(mesh.textures, TexturesUV):
             mesh.textures = pad_texture(mesh)
         t_list.append(mesh.textures.verts_features_list())
         N = len(mesh)

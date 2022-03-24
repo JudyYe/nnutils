@@ -17,8 +17,43 @@ def wrap_cmd(cmd):
             pass
         p.wait()
 
-    
+
+def slurm_wrapper_hydra(args, callable_fn):
+    """name matching for hydra environment"""
+    if args.environment.slurm:
+        executor = submitit.AutoExecutor(
+            folder=args.logging.submitit_dir,
+            slurm_max_num_timeout=100,
+            cluster=None if args.environment.slurm else "debug",
+        )
+        # asks SLURM to send USR1 signal 30 seconds before the time limit
+        additional_parameters = {"signal": 'USR1@120'}
+        if args.environment.nodelist != "":
+            additional_parameters = {"nodelist": args.environment.nodelist}
+        if args.environment.exclude_nodes != "":
+            additional_parameters.update(
+                {"exclude": args.environment.exclude_nodes.replace('+', ',')})
+        args.environment.workers = 10 * args.environment.ngpu
+        executor.update_parameters(
+            timeout_min=args.environment.slurm_timeout,
+            slurm_partition=args.environment.slurm_partition,
+            cpus_per_task=args.environment.workers,
+            gpus_per_node=args.environment.ngpu,
+            nodes=args.environment.world_size,
+            tasks_per_node=1,
+            mem_gb=args.environment.mem_gb,
+            slurm_additional_parameters=additional_parameters,
+            signal_delay_s=120)
+        executor.update_parameters(name=args.expname+args.logging.suffix)
+        job = executor.submit(callable_fn, args)
+        if not args.environment.slurm:
+            job.result()
+    else:
+        callable_fn(args)
+    return 
+
 def slurm_wrapper(args, save_dir, func, func_kwargs):
+    """name matching for my own slurm args"""
     job_name = '/'.join(save_dir.split('/')[-2:])
     save_dir = save_dir  + '/submitit_cache'
     if args.slurm:
