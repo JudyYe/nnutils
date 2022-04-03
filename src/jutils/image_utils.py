@@ -12,10 +12,9 @@ import cv2
 import imageio
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torchvision.utils as vutils
-from torchvision import transforms
 from PIL import Image
+from IPython import display
 
 
 def mask_to_bbox(mask, mode='minmax', rate=1):
@@ -47,6 +46,14 @@ def mask_to_bbox(mask, mode='minmax', rate=1):
         x1, y1 = x_c - rate*x_l, y_c - rate*y_l
         x2, y2 = x_c + rate*x_l, y_c + rate*y_l
 
+    return np.array([x1, y1, x2, y2])
+
+def joint_bbox(*bboxes):
+    bboxes = np.array(bboxes)
+    x1 = bboxes[:, 0].min()
+    y1 = bboxes[:, 1].min()
+    x2 = bboxes[:, 2].max()
+    y2 = bboxes[:, 3].max()
     return np.array([x1, y1, x2, y2])
 
 
@@ -1018,6 +1025,17 @@ def blur(image, k, mask):
     out = (non_zero) * torch_result / (wgt + eps) + \
         (1 - non_zero) * torch_result / ((2*k+1) ** 2 * C)
     return out
+
+########################
+def display_gif(filename):
+    with open(filename,'rb') as f:
+        display.display(display.Image(data=f.read(), format='png'))    
+    # display.Image(filename="%s.png" % filename)
+
+
+def save_image(image, fname):
+    os.makedirs(osp.dirname(fname), exist_ok=True)
+    imageio.imwrite(fname, image)
 
 
 if __name__ == '__main__':
