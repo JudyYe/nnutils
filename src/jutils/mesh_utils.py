@@ -10,13 +10,10 @@ import os.path as osp
 import pickle
 import time
 from typing import List, Tuple, Union, Callable
-from xml.dom import InvalidModificationErr
-from joblib.parallel import Parallel, delayed
-from numpy.lib.arraysetops import isin
 from pytorch3d.renderer.blending import softmax_rgb_blend
 from pytorch3d.renderer.lighting import PointLights
 from pytorch3d.renderer.materials import Materials
-from pytorch3d.renderer.mesh.shader import HardPhongShader, HardFlatShader, SoftPhongShader
+from pytorch3d.renderer.mesh.shader import HardPhongShader,  SoftPhongShader
 from pytorch3d.renderer.mesh.shading import flat_shading
 import skimage.measure
 
@@ -31,9 +28,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch3d.io as io3d
 import pytorch3d.ops as ops_3d
-from pytorch3d.loss import chamfer_distance
+
+import pytorch3d.structures
 import pytorch3d.structures.utils as struct_utils
-from pytorch3d.structures import Meshes, Pointclouds
+from pytorch3d.structures import Pointclouds
 from pytorch3d.structures.meshes import join_meshes_as_batch
 from pytorch3d.transforms import Transform3d, euler_angles_to_matrix, Rotate, Scale, Translate
 from pytorch3d.renderer import (
@@ -41,15 +39,15 @@ from pytorch3d.renderer import (
     PointsRenderer,
     DirectionalLights,
     TexturesUV, TexturesVertex,
-    AlphaCompositor, SoftGouraudShader, HardGouraudShader,
+    AlphaCompositor, 
     RasterizationSettings, PointsRasterizationSettings, PerspectiveCameras, BlendParams,
-    NDCGridRaysampler, EmissionAbsorptionRaymarcher, ImplicitRenderer, MonteCarloRaysampler, mesh)
+    )
 from trimesh.base import Trimesh
 from trimesh.voxel.base import VoxelGrid
 from . import image_utils, geom_utils
 from .layers import grid_sample
 
-
+from .my_pytorch3d import Meshes, chamfer_distance
 # ### Mesh IO Utils ###
 def meshfile_to_glb(mesh_file, out_file):
     mesh = trimesh.load(mesh_file)  
@@ -843,7 +841,7 @@ def scale_geom(geom, scale):
     geom = geom.clone()
     if not torch.is_tensor(scale):
         scale = torch.tensor([[scale]], dtype=torch.float32, device=geom.device)
-    if isinstance(geom, Meshes):
+    if isinstance(geom, Meshes) or isinstance(geom, pytorch3d.structures.Meshes):
         scale_trans = Scale(scale.expand(scale.size(0), 3), device=scale.device)
         geom = apply_transform(geom, scale_trans)
     elif torch.is_tensor(geom):
@@ -856,7 +854,7 @@ def scale_geom(geom, scale):
 
 # ######## PointCloud / Meshes Utils ########
 def get_num_verts(geom: Union[Meshes, Pointclouds]):
-    if isinstance(geom, Meshes):
+    if isinstance(geom, Meshes) or isinstance(geom, pytorch3d.structures.Meshes):
         num = geom.num_verts_per_mesh()
     elif isinstance(geom, Pointclouds):
         num = geom.num_points_per_cloud()
@@ -866,7 +864,7 @@ def get_num_verts(geom: Union[Meshes, Pointclouds]):
 
 
 def get_verts(geom: Union[Meshes, Pointclouds]) -> torch.Tensor:
-    if isinstance(geom, Meshes):
+    if isinstance(geom, Meshes) or isinstance(geom, pytorch3d.structures.Meshes):
         view_points = geom.verts_padded()
     elif isinstance(geom, Pointclouds):
         view_points = geom.points_padded()
@@ -878,7 +876,7 @@ def get_verts(geom: Union[Meshes, Pointclouds]) -> torch.Tensor:
 
 
 def get_render_func(geom: Union[Meshes, Pointclouds]):
-    if isinstance(geom, Meshes):
+    if isinstance(geom, Meshes) or isinstance(geom, pytorch3d.structures.Meshes):
         func = render_mesh
     elif isinstance(geom, Pointclouds):
         func = render_pc
@@ -1407,14 +1405,15 @@ def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, boun
     for n in range(batch_size):
         # marching cube
         verts, faces = convert_sdf_samples_to_ply(sdf_values[n].cpu(), voxel_origin, voxel_size, add_bound=bound)
-        # verts, faces = convert_sdf_samples_to_ply(sdf_values[n].cpu(), voxel_origin, voxel_size, add_bound=False)
         device = samples.device
         verts = verts.to(device)
         faces = faces.to(device)
         verts_list.append(verts)
         faces_list.append(faces)
         tex_list.append(torch.ones_like(verts))
-    meshes = Meshes(verts_list, faces_list, TexturesVertex(tex_list)).cuda()
+    meshes = Meshes(verts_list, faces_list).cuda()
+    if meshes.isempty():
+        meshes.textures = TexturesVertex(torch.ones([batch_size, 0, 3]).cuda())
     return meshes
 
 
@@ -1618,7 +1617,7 @@ def collate_meshes(batch):
             storage = elem.storage()._new_shared(numel)
             out = elem.new(storage)
         return torch.stack(batch, 0, out=out)
-    elif isinstance(elem, Meshes):
+    elif isinstance(elem, Meshes) or isinstance(elem, pytorch3d.structures.Meshes):
         meshes = join_meshes_as_batch(batch)
         return meshes
     elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
@@ -1721,13 +1720,13 @@ def fscore(pred_pts: Meshes, gt_pts: Meshes, trans=None, num_samples=10000, th=N
         th_list = [.2/100, .5/ 100, 1./100, 1./50, 1./20, 1./10]
     else:
         th_list = th
-    if isinstance(pred_pts, Meshes):
+    if isinstance(pred_pts, Meshes) or isinstance(pred_pts, pytorch3d.structures.Meshes):
         if pred_pts.isempty():
             pred_pts = torch.zeros([len(gt_pts), num_samples, 3]).to(pred_pts.device) + 10000
         else:
             pred_pts = ops_3d.sample_points_from_meshes(pred_pts, num_samples)  # N, K, 3
 
-    if isinstance(gt_pts, Meshes):
+    if isinstance(gt_pts, Meshes) or isinstance(gt_pts, pytorch3d.structures.Meshes):
         gt_pts = ops_3d.sample_points_from_meshes(gt_pts, num_samples)
     
     (d1, d2), _ = chamfer_distance(pred_pts, gt_pts, batch_reduction=None, point_reduction=None)
@@ -1750,13 +1749,13 @@ def fscore(pred_pts: Meshes, gt_pts: Meshes, trans=None, num_samples=10000, th=N
     return res_list + [d, ]
 
 def cdscore(pred_pts: Meshes, gt_pts: Meshes, trans=None, num_samples=10000, th=None):
-    if isinstance(pred_pts, Meshes):
+    if isinstance(pred_pts, Meshes) or isinstance(pred_pts, pytorch3d.structures.Meshes):
         if pred_pts.isempty():
             pred_pts = torch.zeros([len(gt_pts), num_samples, 3]).to(pred_pts.device) + 10000
         else:
             pred_pts = ops_3d.sample_points_from_meshes(pred_pts, num_samples)  # N, K, 3
 
-    if isinstance(gt_pts, Meshes):
+    if isinstance(gt_pts, Meshes) or isinstance(gt_pts, pytorch3d.structures.Meshes):
         gt_pts = ops_3d.sample_points_from_meshes(gt_pts, num_samples)
     
     (d1, d2), _ = chamfer_distance(pred_pts, gt_pts, batch_reduction=None, point_reduction=None)
@@ -1788,7 +1787,7 @@ def voxelize(mesh: trimesh.Trimesh, reso=32, return_torch=False) -> Tuple[np.nda
     
     if isinstance(mesh, trimesh.Trimesh):
         voxel_mesh = mesh.voxelized(pitch=2/reso)
-    elif isinstance(mesh, Meshes):
+    elif isinstance(mesh, Meshes) or isinstance(mesh, pytorch3d.structures.Meshes):
         mesh = to_trimesh(mesh)
         voxel_mesh = mesh.voxelized(pitch=2/reso)
     else:
@@ -1874,7 +1873,6 @@ class SoftFlatShader(nn.Module):
         )
         images = softmax_rgb_blend(colors, fragments, blend_params)
         return images
-
 
 if __name__ == '__main__':
     from nnutils import image_utils
