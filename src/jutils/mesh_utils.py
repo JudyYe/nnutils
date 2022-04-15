@@ -1563,9 +1563,12 @@ def convert_sdf_samples_to_ply(
         # scale = scale * (voxel_size + 2) / (voxel_size)
     
     try:
-        verts, faces, normals, values = skimage.measure.marching_cubes_lewiner(
+        verts, faces, normals, values = skimage.measure.marching_cubes(
             numpy_3d_sdf_tensor, level=0.0, spacing=[voxel_size] * 3
         )
+        # verts, faces, normals, values = skimage.measure.marching_cubes_lewiner(
+        #     numpy_3d_sdf_tensor, level=0.0, spacing=[voxel_size] * 3
+        # )
     except ValueError:
         return torch.empty([0, 3], dtype=torch.float32), torch.empty([0, 3], dtype=torch.long)
 

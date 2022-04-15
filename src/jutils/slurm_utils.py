@@ -107,7 +107,7 @@ def add_slurm_args(arg_parser):
         help="If set, debugging messages will be printed",
     )
     arg_parser.add_argument("--sl_time",default=1080, type=int)  # 16 hrs
-    arg_parser.add_argument("--sl_dir", default='/checkpoint/yufeiy2/slurm_cache_shot', type=str)  
+    arg_parser.add_argument("--sl_dir", default='/glusterfs/yufeiy2/slurm_cache_shot', type=str)  
     arg_parser.add_argument("--sl_work",default=10, type=int)
     arg_parser.add_argument("--sl_node",default=1, type=int)  # 16 hrs
     arg_parser.add_argument("--sl_ngpu",default=8, type=int)
