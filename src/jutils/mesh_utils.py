@@ -595,7 +595,8 @@ def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwar
     return out
 
 
-def render_soft(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwargs):
+def render_soft(meshes: Meshes, cameras: PerspectiveCameras, 
+    rgb_mode=True, depth_mode=False, xy_mode=False, **kwargs):
     """
     :param meshes:
     :param cameras:
@@ -644,6 +645,11 @@ def render_soft(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwar
         zbuf[zbuf != zbuf] = -1
         out['depth'] = zbuf
 
+    if xy_mode:
+        cVerts = meshes.verts_padded()
+        iVerts = cameras.transform_points_ndc(cVerts)
+        # iVerts[..., 1] *= -1
+        out['xy'] = iVerts
     return out
 
 
@@ -1417,6 +1423,33 @@ def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, boun
     return meshes
 
 
+def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=False, **kwargs):
+    """convert a batched sdf to meshes
+    Args:
+        grids: (N, H, H, H)
+        batch_size ([type]): batch size in **kwargs
+        total_max_batch ([type], optional): [description]. Defaults to 32**3.
+    Returns:
+        Mehses
+    """
+    N = sdf_values.shape[-1]
+    samples, voxel_origin, voxel_size = grid_xyz_samples(N)  # (P, 3) on cpu
+
+    verts_list, faces_list, tex_list = [], [], []
+    for n in range(batch_size):
+        # marching cube
+        verts, faces = convert_sdf_samples_to_ply(sdf_values[n].cpu(), voxel_origin, voxel_size, add_bound=bound)
+        device = sdf_values.device
+        verts = verts.to(device)
+        faces = faces.to(device)
+        verts_list.append(verts)
+        faces_list.append(faces)
+        tex_list.append(torch.ones_like(verts))
+    meshes = Meshes(verts_list, faces_list).cuda()
+    if meshes.isempty():
+        meshes.textures = TexturesVertex(torch.ones([batch_size, 0, 3]).cuda())
+    return meshes
+
 def sdf_to_meshes(sdf: Callable, cat_func: Callable=lambda x:x, z=None, **kwargs):
     verts_list, faces_list, tex_list = [], [], []
     batch_size = z.size(0)
@@ -1770,6 +1803,22 @@ def to_trimesh(meshes: Meshes) -> Trimesh:
     vert = meshes.verts_list()[0].cpu().detach().numpy()
     face = meshes.faces_list()[0].cpu().detach().numpy()
     return Trimesh(vert, face)
+
+
+def make_grid(N, halfsize=1, device='cpu', order='zyx'):
+    """
+    return: (N, N, N, 3)? last 1-dim in 'xyz'. first 3 layout would be (D, H, W) for zyx, (W, H, D) for xyz
+    """
+    x_l = torch.linspace(-halfsize, halfsize, N)
+    y_l = torch.linspace(-halfsize, halfsize, N)
+    z_l = torch.linspace(-halfsize, halfsize, N)
+    if order == 'zyx':
+        z, y, x = torch.meshgrid(z_l, y_l, x_l)
+    elif order == 'xyz':
+        x, y, z = torch.meshgrid(x_l, y_l, z_l)
+    points_cords = torch.stack([x,y,z], dim=-1).to(device)
+
+    return points_cords
 
 
 def voxelize(mesh: trimesh.Trimesh, reso=32, return_torch=False) -> Tuple[np.ndarray, VoxelGrid]:
