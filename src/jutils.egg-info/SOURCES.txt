@@ -8,6 +8,7 @@ src/jutils/geom_utils.py
 src/jutils/image_utils.py
 src/jutils/layers.py
 src/jutils/mesh_utils.py
+src/jutils/my_pytorch3d.py
 src/jutils/slurm_utils.py
 src/jutils/slurm_wrapper.py
 src/jutils/web_utils.py
