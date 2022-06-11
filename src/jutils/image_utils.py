@@ -12,10 +12,10 @@ import cv2
 import imageio
 import numpy as np
 import torch
-import torch.nn.functional as F
 import torchvision.utils as vutils
-from torchvision import transforms
 from PIL import Image
+# from IPython import display
+from skimage import measure
 
 
 def mask_to_bbox(mask, mode='minmax', rate=1):
@@ -47,6 +47,14 @@ def mask_to_bbox(mask, mode='minmax', rate=1):
         x1, y1 = x_c - rate*x_l, y_c - rate*y_l
         x2, y2 = x_c + rate*x_l, y_c + rate*y_l
 
+    return np.array([x1, y1, x2, y2])
+
+def joint_bbox(*bboxes):
+    bboxes = np.array(bboxes)
+    x1 = bboxes[:, 0].min()
+    y1 = bboxes[:, 1].min()
+    x2 = bboxes[:, 2].max()
+    y2 = bboxes[:, 3].max()
     return np.array([x1, y1, x2, y2])
 
 
@@ -126,7 +134,23 @@ def jitter_bbox(bbox, s_stdev, t_stdev):
     bbox[2:4] = center + new_size / 2   
     return bbox 
 
+def pad_bbox(bbox, pad=0):
+    if not torch.is_tensor(bbox):
+        is_numpy = True
+        bbox = torch.FloatTensor(bbox)
+    else:
+        is_numpy = False
 
+    x1y1, x2y2 = bbox[..., :2], bbox[..., 2:]
+    center = (x1y1 + x2y2) / 2 
+    half_xy = (x2y2 - x1y1) / 2
+    half_xy = half_xy * (1 + 2 * pad)
+    bbox = torch.cat([center - half_xy, center + half_xy], dim=-1)
+    if is_numpy:
+        bbox = bbox.cpu().detach().numpy()
+    return bbox
+
+    
 def square_bbox(bbox, pad=0):
     if not torch.is_tensor(bbox):
         is_numpy = True
@@ -532,6 +556,70 @@ def save_dxdy(dxdy, fname, scale=False):
         dxdy = torch.cat([dxdy, torch.zeros(N, 1, H, W, device=dxdy.device)], dim=1)
     save_images(dxdy, fname, scale=True)
 
+
+def sample_contour(
+        mask,
+    ):
+    # indices_y, indices_x = np.where(mask)
+    # npoints = len(indices_y)
+    contour = measure.find_contours(mask, 0)
+    contour = np.concatenate(contour)
+    sample_size = 1000
+
+    def offset_and_clip_contour(contour, offset, img_size):
+        contour = contour + offset
+        contour = np.clip(contour, a_min=0, a_max=img_size - 1)
+        return contour
+
+    offsets = np.array(
+        [
+            [0, 0],
+            [0, 1],
+            [0, 2],
+            [0, -1],
+            [0, -2],
+            [1, 0],
+            [2, 0],
+            [-1, 0],
+            [-2, 0],
+            [-1, -1],
+            [-2, -2],
+            [1, 1],
+            [2, 2],
+            [-1, 1],
+            [-2, 2],
+            [1, -1],
+            [2, -2],
+        ]
+    )
+
+    img_size = mask.shape[0]
+    new_contours = []
+    for offset in offsets:
+        temp_contour = offset_and_clip_contour(
+            contour, offset.reshape(-1, 2), img_size
+        )
+        new_contours.append(temp_contour)
+
+    new_contours = np.concatenate(new_contours)
+    # contour_mask = mask * 0
+    # new_contours = new_contours.astype(np.int)
+    # contour_mask[new_contours[:,0], new_contours[:,1]] = 1
+    npoints = len(new_contours)
+    sample_indices = np.random.choice(
+        range(npoints), size=sample_size, replace=False
+    )
+
+    # swtich x any y.
+
+    temp = np.stack(
+        [new_contours[sample_indices, 1], new_contours[sample_indices, 0]],
+        axis=1
+    )
+    temp = temp.copy()
+    return temp
+
+
 def draw_contour(xy, width=64, color=(0, 255, 0)):
     """
     :param xy: numpy / tensor, in range of [-1, 1]
@@ -549,14 +637,14 @@ def draw_contour(xy, width=64, color=(0, 255, 0)):
     return canvas
 
 
-def save_contour(contours, fname, ):
+def save_contour(contours, fname, out_size=64):
     """
     :param: contours: (N, P, 2)
     :return:
     """
     image_list = []
     for n in range(contours.size(0)):
-        canvas = draw_contour(contours[n])
+        canvas = draw_contour(contours[n], out_size)
         image_list.append(canvas)
     image_list = torch.from_numpy(np.array(image_list).transpose([0, 3, 1, 2]))
     image = vutils.make_grid(image_list)
@@ -564,9 +652,9 @@ def save_contour(contours, fname, ):
     image = np.clip(image, 0, 255).astype(np.uint8)
 
     if fname is not None:
-        if not os.path.exists(os.path.dirname(fname)):
-            os.makedirs(os.path.dirname(fname))
+        os.makedirs(os.path.dirname(fname), exist_ok=True)
         imageio.imwrite(fname + '.png', image)
+        print('save to ', fname + '.png')
     return image
 
 
@@ -639,7 +727,7 @@ def write_gif(image_list, gif_name):
     print('save to ', gif_name + '.gif')
 
 
-def write_mp4(video, save_file):
+def write_mp4(video, save_file, ffmpeg_dir='~/.local/bin/'):
     tmp_dir = save_file + '.tmp'
     os.makedirs(tmp_dir, exist_ok=True)
     for t, image in enumerate(video):
@@ -648,7 +736,7 @@ def write_mp4(video, save_file):
     if osp.exists(save_file + '.mp4'):
         os.system('rm %s.mp4' % (save_file))
     src_list_dir = osp.join(tmp_dir, '%02d.jpg')
-    cmd = 'ffmpeg -framerate 10 -i %s -c:v libx264 -pix_fmt yuv420p %s.mp4' % (src_list_dir, save_file)
+    cmd = ffmpeg_dir + 'ffmpeg -framerate 10 -i %s -c:v libx264 -pix_fmt yuv420p %s.mp4' % (src_list_dir, save_file)
     cmd += ' -hide_banner -loglevel error'
     print(cmd)
     os.system(cmd)
@@ -763,11 +851,39 @@ def vis_j2d(image_tensor, pts, j_list=[0, 8, 11, 14, 17, 20], color=(0, 1, 0), n
     :param: pts: (N, V, 2) of (x, y) pairs
     :return: torch.cpu.tensor (N, C, H, W) RGB range(0, 1)
     """
-    return vis_pts(image_tensor, pts, color, normed, j_list)
+    image_tensor = vis_pts(image_tensor, pts, color, normed, j_list)
+    
+    bones = [
+        [0, 1], [1, 2], [2, 3], [3, 4],
+        [0, 5], [5, 6], [6, 7], [7, 8],
+        [0, 9], [9, 10], [10, 11], [11, 12],
+        [0, 13], [13, 14], [14, 15], [15, 16], 
+        [0, 17], [17, 18], [18, 19], [19, 20],
+    ]
+
+    # draw bone
+    if torch.is_tensor(image_tensor):
+        image_tensor = image_tensor.cpu().detach().numpy().transpose([0, 2, 3, 1])  # N, H, W, C
+    if torch.is_tensor(pts):
+        pts = pts.cpu().detach().numpy()
+    N, H, W, _ = image_tensor.shape
+    if normed:
+        pts = (pts + 1) / 2 * np.array([[[W, H]]])
+    image_list = []
+    for n in range(N):
+        image = image_tensor[n].copy()
+        for bs, bt in bones:
+            x1, y1 = pts[n, bs] 
+            x2, y2 = pts[n, bt]
+            cv2.line(image, (int(x1), int(y1)), (int(x2), int(y2)), color, 3)
+        image_list.append(image)
+    image_list = np.array(image_list)
+    image_list = torch.FloatTensor(image_list.transpose(0, 3, 1, 2))
+    return image_list
+
 
 def draw_bbox(image, x1y1x2y2, color):
     for i in range(len(x1y1x2y2)):
-        print('hello')
         x1, y1, x2, y2 = x1y1x2y2[i]
         cv2.rectangle(image, (int(x1), int(y1)), (int(x2), int(y2)), color, 3)
     return image
@@ -1018,6 +1134,17 @@ def blur(image, k, mask):
     out = (non_zero) * torch_result / (wgt + eps) + \
         (1 - non_zero) * torch_result / ((2*k+1) ** 2 * C)
     return out
+
+########################
+def display_gif(filename):
+    with open(filename,'rb') as f:
+        display.display(display.Image(data=f.read(), format='png'))    
+    # display.Image(filename="%s.png" % filename)
+
+
+def save_image(image, fname):
+    os.makedirs(osp.dirname(fname), exist_ok=True)
+    imageio.imwrite(fname, image)
 
 
 if __name__ == '__main__':
