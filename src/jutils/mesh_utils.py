@@ -20,7 +20,10 @@ import skimage.measure
 import numpy as np
 from scipy.spatial.distance import cdist
 import re
-from torch._six import container_abcs, string_classes, int_classes
+from torch._six import string_classes
+import collections.abc as container_abcs
+int_classes = int
+
 
 import trimesh
 import torch
@@ -241,7 +244,8 @@ def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex
     elif feature == 'yellow':
         feature = torch.zeros_like(meshes.verts_padded())
         # yellow = [250 / 255.0, 230 / 255.0, 154 / 255.0],        
-        color = torch.FloatTensor([[[250 / 255.0, 230 / 255.0, 154 / 255.0]]]).to(meshes.device) * 2 - 1
+        color = torch.FloatTensor([[[240 / 255.0, 207 / 255.0, 192 / 255.0]]]).to(meshes.device)
+            # color = torch.FloatTensor([[[250 / 255.0, 230 / 255.0, 154 / 255.0]]]).to(meshes.device) * 2 - 1
         feature = feature + color
     elif feature == 'random':
         feature = torch.rand_like(meshes.verts_padded())  # [0, 1]
