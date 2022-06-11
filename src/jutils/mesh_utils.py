@@ -11,7 +11,6 @@ import pickle
 import time
 from typing import List, Tuple, Union, Callable
 from xml.dom import InvalidModificationErr
-from joblib.parallel import Parallel, delayed
 from numpy.lib.arraysetops import isin
 from pytorch3d.renderer.blending import softmax_rgb_blend
 from pytorch3d.renderer.lighting import PointLights
@@ -23,8 +22,7 @@ import skimage.measure
 import numpy as np
 from scipy.spatial.distance import cdist
 import re
-from torch._six import container_abcs, string_classes, int_classes
-
+from torch._six import string_classes
 import trimesh
 import torch
 import torch.nn as nn
