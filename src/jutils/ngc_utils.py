@@ -23,7 +23,9 @@ def add_ngc_args(arg_parser: ArgumentParser):
     arg_parser.add_argument("--sl_dry",action="store_true",)
     arg_parser.add_argument("--sl_time",default=24, type=float, help='in hour')  # 16 hrs
     arg_parser.add_argument("--sl_ngpu",default=1, type=int)
+    arg_parser.add_argument("--sl_mem",default=16, type=int)
 
+    arg_parser.add_argument("--sl_name",default=None, type=str)
     arg_parser.add_argument("--sl_org",default='nvidian', type=str)
     arg_parser.add_argument("--sl_team",default='lpr', type=str)
     arg_parser.add_argument("--sl_ace",default='nv-us-west-2', type=str)
@@ -31,9 +33,10 @@ def add_ngc_args(arg_parser: ArgumentParser):
 
     arg_parser.add_argument("--sl_ws",default='ws-judyye', type=str)
     arg_parser.add_argument("--sl_ws_src",default='/ws/', type=str)
-    arg_parser.add_argument("--sl_data",default='102373:ho3d', type=str)
+    arg_parser.add_argument("--sl_data",default='102373:ho3d+109663:obman', type=str)
 
-    arg_parser.add_argument("--sl_image",default='nvidian/lpr/dexafford:conda_libgl', type=str)
+    arg_parser.add_argument('--sl_pip', default='/ws-judyye/dex_afford/src/docs/jit_pip.sh')
+    arg_parser.add_argument("--sl_image",default='nvidian/lpr/dexafford:all_in_docker', type=str)
     arg_parser.add_argument("--sl_result", default='/result/', type=str)  
 
     return arg_parser
@@ -43,19 +46,22 @@ def ngc_wrapper(args, name, core_cmd):
     cmd = 'ngc batch run '
     cmd += ' --preempt %s' % args.sl_preempt
     cmd += ' --ace %s' % args.sl_ace
-    cmd += ' --instance dgx1v.16g.%d.norm' % args.sl_ngpu
+    if args.sl_ngpu == 0:
+        cmd += ' --instance cpu.x86.tiny'
+    else:
+        cmd += ' --instance dgx1v.%dg.%d.norm' % (args.sl_mem, args.sl_ngpu)
     cmd += ' --image %s' % args.sl_image
     cmd += ' --result %s ' % args.sl_result
     cmd += ' --org %s --team %s' % (args.sl_org, args.sl_team)
     cmd += ' --workspace %s:/%s:RW' % (args.sl_ws, args.sl_ws)
     for data in args.sl_data.split('+'):
-        cmd += ' --datasetid %s' % args.sl_data
+        cmd += ' --datasetid %s' % data
     cmd += ' --total-runtime %ds' % int(args.sl_time * 3600)
     cmd += ' --name ml-model.%s' % name
     
     print(core_cmd)
     ws_dst = os.path.join('/', args.sl_ws, os.getcwd().split(args.sl_ws_src)[1])
-    setup_cmd = ' . /ws-judyye/conda/remote.sh; cd %s; ' % ws_dst
+    setup_cmd = '. %s; cd %s; ' % (args.sl_pip, ws_dst)
     cmd += r' --commandline "%s  %s"' % (setup_cmd, core_cmd)
 
     if not args.sl_dry:
@@ -74,10 +80,12 @@ def ngc_engine():
     print(unknown)
     # \$ -> \\\$
     unknown = [e.replace('$', '\\\\\\$') for e in unknown]  # because reading in will take 
-    print(unknown)
+    # print(unknown)
+    if sl_args.sl_name is None:
+        sl_args.sl_name = re.sub(r'[^A-Za-z0-9\.]+', '', '.'.join(unknown))[0:100]
     ngc_wrapper(
         sl_args, 
-        re.sub(r'[^A-Za-z0-9\.]+', '', '.'.join(unknown)),  
+        sl_args.sl_name,  
         ' '.join(unknown))
 
 
@@ -109,12 +117,13 @@ def wrap_cmd(cmd):
 
 
 class Executor:
-    def __init__(self, folder, local_str='', remote_str='') -> None:
+    def __init__(self, folder, local_str='', remote_str='', cmd='') -> None:
         self.params = {}
         os.makedirs(folder, exist_ok=True)
         self.submit_dir = folder
         self.local_str = local_str
         self.remote_str = remote_str
+        self.cmd = cmd
 
     def update_parameters(self, **kwargs):
         for k, v in kwargs.items():
@@ -126,6 +135,7 @@ class Executor:
     
     def submit(self, func, func_args):
         import hydra.utils as hydra_utils
+        print(self.params)
         cmd = self._param_to_str()
         MAIN_PID = os.getpid()
         fname = os.path.join(self.submit_dir, '%d_submit.pkl' % MAIN_PID)
@@ -137,7 +147,7 @@ class Executor:
             pickle.dump({'func': func, 'args': func_args}, fp) 
 
         # write batch file
-        setup_cmd = ' . /ws-judyye/conda/remote.sh; cd %s; ' % ws_dst
+        setup_cmd = ' %s; cd %s; ' % (self.cmd, ws_dst)
         core_cmd = 'python -m jutils.ngc.exec_submit %s' % fname.replace(self.local_str, self.remote_str)
         cmd += ' --commandline "%s %s"' % (setup_cmd, core_cmd)
     
@@ -161,7 +171,7 @@ class Executor:
                     cmd += ' --datasetid %s ' % e
             else:
                 cmd += ' --%s %s ' % (k, v)            
-        
+        print('ngc cmd', cmd)
         return cmd
 
 
