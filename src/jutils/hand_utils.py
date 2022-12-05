@@ -6,13 +6,13 @@ import pickle
 import os.path as osp
 from typing import Tuple
 import numpy as np
-import smplx
 import torch
 import torch.nn as nn
 from pytorch3d.renderer import TexturesVertex, TexturesUV
 from pytorch3d.structures import Meshes
 from pytorch3d.transforms import Transform3d, Rotate, Translate
 from pytorch3d.io import load_obj
+from pytorch3d.renderer import OrthographicCameras
 
 from manopth.manolayer import ManoLayer
 from manopth.tensutils import th_with_zeros, th_posemap_axisang
@@ -130,7 +130,8 @@ class ManopthWrapper(nn.Module):
         self.register_buffer('contact_index' , torch.LongTensor(contact_list))
 
         # load uv map
-        rtn = load_obj(osp.join(mano_path, 'open_hand_uv.obj'))
+        print('uv map', kwargs.get('uv', 'open_hand_uv') + '.obj')
+        rtn = load_obj(osp.join(mano_path, kwargs.get('uv', 'open_hand_uv') + '.obj'))
         self.register_buffer('verts_uv', rtn[2].verts_uvs[None])
         self.register_buffer('faces_uv', rtn[1].textures_idx[None])
     
@@ -337,46 +338,124 @@ class ManopthWrapper(nn.Module):
         th_jtr = th_jtr[:, [0, 13, 14, 15, 1, 2, 3, 4, 5, 6, 10, 11, 12, 7, 8, 9]]
         return th_jtr
 
+    def wrapper_to_mano_layer(self, cam_f, cam_p, cTh, hA, ncomps=45):
+        rot, trans, scale = geom_utils.homo_to_rt(cTh)
+        s = cam_f[..., 0:1] / trans[..., -1:] # f / tz
+        u = s * trans[..., 0:2] + cam_p # / trans[..., -1:]
+        cam = torch.cat([s, u], -1)
 
-class ManoWrapper:
-    def __init__(self, cfg):
-        self.mano = smplx.create(cfg.HAND.MANO_PATH, 'mano')
-        # self.mano = smplx.build_layer(cfg.HAND.MANO_PATH, 'mano')
-        self.hand_info = load_pkl(cfg.HAND_INFO_FILE)
+        wrist = geom_utils.matrix_to_axis_angle(rot)
+        pose = torch.cat([wrist, hA], -1)
+        return cam, pose
 
-        self.right_hand_faces_local = self.hand_info['right_hand_faces_local']
+    def mano_proj(self, cam, pose, out_size=224, render=False, soft=False, **kwargs):
+        """weakly project aritcualted hand to image space
 
-    def __call__(self, se3, hand_type='right_hand', shape_param=None, pose_param=None, return_mesh=True, **kwargs):
+        :param cam: in shape of (N, 3), scale, tx, ty, txty in NDC space. transformation sX+tx
+        :param pose: in shape of (N, 6 + ncomps)
+        :param out_size: size of rendering, defaults to 224
         """
-        # joints index order - panoptic , rot form: axis angle
-        :param return_mesh: global?
-        :param kwargs:
-        :return: joints in panoptic order. verts /faces in MANO_RIGHT?? order
-        """
-        N = se3.size(0)
-        device = se3.device
+        device = cam.device
+        s, txty = cam.split([1, 2], -1)
+        cameras = OrthographicCameras(s, txty, device=device)
+        cTh, hA = self.mano_layer_to_wrapper(pose, kwargs.get('hack_z_clip', True))
+        cHand, _ = self(cTh, hA,  **kwargs)
 
-        axisangle, transl = geom_utils.se3_to_axis_angle_t(se3)
-        hand_out = self.mano(betas=shape_param, hand_pose=pose_param, global_orient=axisangle, transl=transl,**kwargs)
-        verts = hand_out['vertices']
-
-        smplx_hand_to_panoptic = [0, 13, 14, 15, 16, 1, 2, 3, 17, 4, 5, 6, 18, 10, 11, 12, 19, 7, 8, 9, 20]
-
-        hand_joints = hand_out['joints'][:, smplx_hand_to_panoptic, :]
-
-        faces = self.hand_info['right_hand_faces_local']
-        faces = faces.expand(N, faces.size(1), 3).to(device)
-
-        if hand_type == 'left_hand':  # flip left hand
-            verts[:, 0] *= -1
-            faces = faces[:, ::-1]
-            hand_joints[:, 0] *= -1
-
-        textures = torch.ones_like(verts)
-        if return_mesh:
-            return  Meshes(verts, faces, TexturesVertex(textures))
+        if render:
+            if soft:
+                out = mesh_utils.render_soft(cHand, cameras, out_size=out_size, **kwargs)
+            else:
+                out = mesh_utils.render_mesh(cHand, cameras, out_size=out_size, **kwargs)
         else:
-            return verts, faces, textures
+            out = {}
+        return cHand, cameras, out
+
+    def wrapper_to_vae(self, cam_f, cam_p, cTh, hA, ncomps=45):
+        rot, trans, scale = geom_utils.homo_to_rt(cTh)
+        s = cam_f[..., 0:1] / trans[..., -1:] # f / tz
+        u = s * trans[..., 0:2] + cam_p # / trans[..., -1:]
+        cam = torch.cat([s, u], -1)
+
+        wrist = geom_utils.matrix_to_rotation_6d(rot)
+        pca = self.pose_to_pca(hA, ncomps)
+        pose = torch.cat([wrist, pca], -1)
+        return cam,  pose
+    
+    def mocap_to_wrapper(self, cam, pose, hack_z_clip=True):
+        """ from 6+ncomps to hA + se3
+
+        :param pose: (N, 6+ncomps) without mean_hand ? 
+        :return: cTh in shape of (N, 4, 4)
+        :return: hA in shape of (N, 45)
+        """
+        rot, pose = pose.split([3, pose.shape[-1] - 3], -1)
+        # push further from camera to avoid z-clippi8ng
+        N, device = len(pose), pose.device
+        z_trans = torch.zeros([N, 3], device=device)
+        if hack_z_clip:
+            z_trans[..., -1] = 20
+        cTh = geom_utils.axis_angle_t_to_matrix(rot, z_trans)
+        # cTh = geom_utils.rt_to_homo(geom_utils.rotation_6d_to_matrix(so3), z_trans)
+        
+        hA = pose + self.hand_mean
+
+        device = cam.device
+        s, txty = cam.split([1, 2], -1)
+        cameras = OrthographicCameras(s, s*txty, device=device)
+
+        return cTh, hA, cameras
+
+    def mano_layer_to_wrapper(self, pose, hack_z_clip=True):
+        wrist, hA = pose.split([3, pose.shape[-1] - 3], -1)
+        # push further from camera to avoid z-clippi8ng
+        N, device = len(pose), pose.device
+        z_trans = torch.zeros([N, 3], device=device)
+        if hack_z_clip:
+            z_trans[..., -1] = 20
+        cTh = geom_utils.axis_angle_t_to_matrix(wrist, z_trans)
+        
+        return cTh, hA        
+        
+    def vae_to_wrapper(self, pose, hack_z_clip=True):
+        """ from 6+ncomps to hA + se3
+
+        :param pose: (N, 6+ncomps) without mean_hand ? 
+        :return: cTh in shape of (N, 4, 4)
+        :return: hA in shape of (N, 45)
+        """
+        so3, pca = pose.split([6, pose.shape[-1] - 6], -1)
+        # push further from camera to avoid z-clippi8ng
+        N, device = len(pose), pose.device
+        z_trans = torch.zeros([N, 3], device=device)
+        if hack_z_clip:
+            z_trans[..., -1] = 20
+        cTh = geom_utils.rt_to_homo(geom_utils.rotation_6d_to_matrix(so3), z_trans)
+        
+        hA = self.pca_to_pose(pca)
+        return cTh, hA
+
+    def weak_proj(self, cam, pose, out_size=224, render=False, soft=False, **kwargs):
+        """weakly project aritcualted hand to image space
+
+        :param cam: in shape of (N, 3), scale, tx, ty, txty in NDC space. transformation sX+tx
+        :param pose: in shape of (N, 6 + ncomps)
+        :param out_size: size of rendering, defaults to 224
+        """
+        device = cam.device
+        s, txty = cam.split([1, 2], -1)
+        cameras = OrthographicCameras(s, txty, device=device)
+        cTh, hA = self.vae_to_wrapper(pose, kwargs.get('hack_z_clip', True))
+        cHand, _ = self(cTh, hA,  **kwargs)
+
+        if render:
+            if soft:
+                out = mesh_utils.render_soft(cHand, cameras, out_size=out_size, **kwargs)
+            else:
+                out = mesh_utils.render_mesh(cHand, cameras, out_size=out_size, **kwargs)
+        else:
+            out = {}
+        return cHand, cameras, out
+
 
 
 def cvt_axisang_t_i2o(axisang, trans):
