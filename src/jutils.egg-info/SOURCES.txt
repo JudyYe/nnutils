@@ -19,3 +19,8 @@ src/jutils.egg-info/PKG-INFO
 src/jutils.egg-info/SOURCES.txt
 src/jutils.egg-info/dependency_links.txt
 src/jutils.egg-info/top_level.txt
+src/jutils/ngc/__init__.py
+src/jutils/ngc/exec_submit.py
+src/jutils/ngc/kill.py
+src/jutils/ngc/res_dog.py
+src/jutils/ngc/upload_ngc_dataset.py

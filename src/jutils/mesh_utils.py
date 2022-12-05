@@ -11,7 +11,7 @@ import pickle
 import time
 from typing import List, Tuple, Union, Callable
 from pytorch3d.renderer.blending import softmax_rgb_blend
-from pytorch3d.renderer.lighting import PointLights
+from pytorch3d.renderer.lighting import PointLights, AmbientLights
 from pytorch3d.renderer.materials import Materials
 from pytorch3d.renderer.mesh.shader import HardPhongShader,  SoftPhongShader
 from pytorch3d.renderer.mesh.shading import flat_shading
@@ -239,12 +239,13 @@ def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex
     elif feature == 'blue':
         feature = torch.zeros_like(meshes.verts_padded())
         color = torch.FloatTensor([[[203,238,254]]]).to(meshes.device)  / 255   
-        color = torch.FloatTensor([[[183,216,254]]]).to(meshes.device)  / 255   
+        color = torch.FloatTensor([[[183,216,254]]]).to(meshes.device)  / 255 # * s - s/2
         feature = feature + color
     elif feature == 'yellow':
         feature = torch.zeros_like(meshes.verts_padded())
         # yellow = [250 / 255.0, 230 / 255.0, 154 / 255.0],        
         color = torch.FloatTensor([[[240 / 255.0, 207 / 255.0, 192 / 255.0]]]).to(meshes.device)
+        color = color * 2 - 1
             # color = torch.FloatTensor([[[250 / 255.0, 230 / 255.0, 154 / 255.0]]]).to(meshes.device) * 2 - 1
         feature = feature + color
     elif feature == 'random':
@@ -551,6 +552,39 @@ def render_mesh_flow(wMeshes, cam1: PerspectiveCameras, cam2: PerspectiveCameras
     return out
 
 
+def fragment_to_shader(fragments, meshes, cameras, rgb_mode=True, depth_mode=False, xy_mode=False, **kwargs):
+    out = {}    
+    if rgb_mode:
+        # shader = SoftGouraudShader(device, lights=ambient_light(meshes.device, cameras))
+        shader = kwargs.get('shader', HardPhongShader(device=meshes.device, lights=ambient_light(meshes.device, cameras, **kwargs)))
+        if torch.isnan(fragments.zbuf).any():
+            fname = '/checkpoint/yufeiy2/hoi_output/vis/mesh.pkl'
+            os.makedirs(os.path.dirname(fname), exist_ok=True)
+            with open(fname, 'wb') as fp:
+                pickle.dump({'mesh': meshes, 'camera': cameras}, fp)
+            import pdb
+            pdb.set_trace()
+        image = shader(fragments, meshes, cameras=cameras, **kwargs)  # znear=znear, zfar=zfar, **kwargs)
+        rgb, mask = flip_transpose_canvas(image)
+
+        out['image'] = rgb
+        out['mask'] = mask
+
+    if depth_mode:
+        zbuf = fragments.zbuf[..., 0:1]
+        zbuf = flip_transpose_canvas(zbuf, False)
+        zbuf[zbuf != zbuf] = -1
+        out['depth'] = zbuf
+
+    if xy_mode:
+        cVerts = meshes.verts_padded()
+        iVerts = cameras.transform_points_ndc(cVerts)
+        # iVerts[..., 1] *= -1
+        out['xy'] = iVerts
+    return out
+
+
+
 def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwargs):
     """
     flip issue: https://github.com/facebookresearch/pytorch3d/issues/78
@@ -574,9 +608,8 @@ def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwar
     out['frag'] = fragments
 
     if rgb_mode:
-        # shader = HardGouraudShader(device=meshes.device, lights=ambient_light(meshes.device, cameras))
-        shader = HardPhongShader(device=meshes.device, lights=ambient_light(meshes.device, cameras))
-        image = shader(fragments, meshes, cameras=cameras, )  # znear=znear, zfar=zfar, **kwargs)
+        shader = kwargs.get('shader', HardPhongShader(device=meshes.device, lights=ambient_light(meshes.device, cameras, **kwargs)))
+        image = shader(fragments, meshes, cameras=cameras, **kwargs)  # znear=znear, zfar=zfar, **kwargs)
         rgb, _ = flip_transpose_canvas(image)
 
         # get mask
@@ -610,7 +643,7 @@ def render_soft(meshes: Meshes, cameras: PerspectiveCameras,
              'depth': (N, 1, H, W),
               'frag':,
     """
-    blend_params = BlendParams(sigma=kwargs.get('sigma', 1e-5), gamma=1e-4)
+    blend_params = kwargs.get('blend_params', BlendParams(sigma=kwargs.get('sigma', 1e-5), gamma=1e-4))
     dist_eps = 1e-6
     # blend_params = BlendParams(sigma=1e-4, gamma=1e-4)
     # dist_eps = 1e-4
@@ -629,7 +662,7 @@ def render_soft(meshes: Meshes, cameras: PerspectiveCameras,
 
     if rgb_mode:
         # shader = SoftGouraudShader(device, lights=ambient_light(meshes.device, cameras))
-        shader = SoftPhongShader(device, lights=ambient_light(meshes.device, cameras))
+        shader = kwargs.get('shader', SoftPhongShader(device, lights=ambient_light(meshes.device, cameras, **kwargs)))
         if torch.isnan(fragments.zbuf).any():
             fname = '/checkpoint/yufeiy2/hoi_output/vis/mesh.pkl'
             os.makedirs(os.path.dirname(fname), exist_ok=True)
@@ -637,7 +670,7 @@ def render_soft(meshes: Meshes, cameras: PerspectiveCameras,
                 pickle.dump({'mesh': meshes, 'camera': cameras}, fp)
             import pdb
             pdb.set_trace()
-        image = shader(fragments, meshes, cameras=cameras, )  # znear=znear, zfar=zfar, **kwargs)
+        image = shader(fragments, meshes, cameras=cameras, blend_params=blend_params)  # znear=znear, zfar=zfar, **kwargs)
         rgb, mask = flip_transpose_canvas(image)
 
         out['image'] = rgb
@@ -1221,19 +1254,39 @@ def ambient_light(device='cpu', cameras: PerspectiveCameras = None, **kwargs):
         d = d.squeeze(1)
 
     color = kwargs.get('light_color', np.array([0.65, 0.3, 0.0]))
-    am, df, sp = color
-    am = zeros + am
-    df = zeros + df
-    sp = zeros + sp
-    lights = DirectionalLights(
-        device=device,
-        ambient_color=am,
-        diffuse_color=df,
-        specular_color=sp,
-        direction=d,
-    )
+    D = kwargs.get('dims', 3)
+    t_zeros = torch.zeros([N, D], device=device)
+    if D == 3:
+        am, df, sp = color
+        am = t_zeros + am
+        df = t_zeros + df
+        sp = t_zeros + sp
+        lights = DirectionalLights(
+            device=device,
+            ambient_color=am,
+            diffuse_color=df,
+            specular_color=sp,
+            direction=d,
+        )
+    else:
+        lights = MyAmbientLights(ambient_color=t_zeros + 1, device=device)
     return lights
 
+
+class MyAmbientLights(AmbientLights):
+    def __init__(self, *, ambient_color=None, device = "cpu") -> None:
+        super().__init__(ambient_color=ambient_color, device=device)
+        self.D = self.ambient_color.shape[-1]
+
+    def diffuse(self, normals, points) -> torch.Tensor:
+        N = len(points)
+        D = self.D
+        return torch.zeros([N, D], device=self.device)
+
+    def specular(self, normals, points, camera_position, shininess) -> torch.Tensor:
+        N = len(points)
+        D = self.D
+        return torch.zeros([N, D], device=self.device)    
 
 def local_to_world_mesh(meshes: Meshes, trans):
     """
@@ -1880,55 +1933,6 @@ def sample_unit_cube(hObj, num_points, r=1):
         handle = torch.gather(hObj, 0, inds.repeat(1, D))
         return handle
 
-class SoftFlatShader(nn.Module):
-    """
-    Per face lighting - the lighting model is applied using the average face
-    position and the face normal. The blending function hard assigns
-    the color of the closest face for each pixel.
-    To use the default values, simply initialize the shader with the desired
-    device e.g.
-    .. code-block::
-        shader = HardFlatShader(device=torch.device("cuda:0"))
-    """
-
-    def __init__(
-        self, device="cpu", cameras=None, lights=None, materials=None, blend_params=None
-    ):
-        super().__init__()
-        self.lights = lights if lights is not None else PointLights(device=device)
-        self.materials = (
-            materials if materials is not None else Materials(device=device)
-        )
-        self.cameras = cameras
-        self.blend_params = blend_params if blend_params is not None else BlendParams()
-
-    def to(self, device):
-        # Manually move to device modules which are not subclasses of nn.Module
-        self.cameras = self.cameras.to(device)
-        self.materials = self.materials.to(device)
-        self.lights = self.lights.to(device)
-        return self
-
-    def forward(self, fragments, meshes, **kwargs) -> torch.Tensor:
-        cameras = kwargs.get("cameras", self.cameras)
-        if cameras is None:
-            msg = "Cameras must be specified either at initialization \
-                or in the forward pass of HardFlatShader"
-            raise ValueError(msg)
-        texels = meshes.sample_textures(fragments)
-        lights = kwargs.get("lights", self.lights)
-        materials = kwargs.get("materials", self.materials)
-        blend_params = kwargs.get("blend_params", self.blend_params)
-        colors = flat_shading(
-            meshes=meshes,
-            fragments=fragments,
-            texels=texels,
-            lights=lights,
-            cameras=cameras,
-            materials=materials,
-        )
-        images = softmax_rgb_blend(colors, fragments, blend_params)
-        return images
 
 if __name__ == '__main__':
     from nnutils import image_utils
