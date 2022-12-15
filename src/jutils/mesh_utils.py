@@ -10,11 +10,6 @@ import os.path as osp
 import pickle
 import time
 from typing import List, Tuple, Union, Callable
-<<<<<<< HEAD
-from xml.dom import InvalidModificationErr
-from numpy.lib.arraysetops import isin
-=======
->>>>>>> 2de7441a39012bcbaa718b6a066b2e77eaecf5c4
 from pytorch3d.renderer.blending import softmax_rgb_blend
 from pytorch3d.renderer.lighting import PointLights, AmbientLights
 from pytorch3d.renderer.materials import Materials
@@ -26,13 +21,10 @@ import numpy as np
 from scipy.spatial.distance import cdist
 import re
 from torch._six import string_classes
-<<<<<<< HEAD
-=======
 import collections.abc as container_abcs
 int_classes = int
 
 
->>>>>>> 2de7441a39012bcbaa718b6a066b2e77eaecf5c4
 import trimesh
 import torch
 import torch.nn as nn
