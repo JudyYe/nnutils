@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import torchvision.utils as vutils
 from PIL import Image
-from IPython import display
+# from IPython import display
 from skimage import measure
 
 
