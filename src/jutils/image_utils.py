@@ -58,6 +58,15 @@ def joint_bbox(*bboxes):
     return np.array([x1, y1, x2, y2])
 
 
+def intersect_box(*bboxes):
+    bboxes = np.array(bboxes)
+    x1 = bboxes[:, 0].max()
+    y1 = bboxes[:, 1].max()
+    x2 = bboxes[:, 2].min()
+    y2 = bboxes[:, 3].min()
+    return np.array([x1, y1, x2, y2])
+
+
 def crop_weak_cam(cam, bbox_topleft, oldo2n, 
     new_center, new_size, old_size=224, resize=224):
     """
@@ -151,6 +160,29 @@ def pad_bbox(bbox, pad=0):
     return bbox
 
     
+def square_bbox_no_black(bbox, Ymax, Xmax, pad=0):
+    bbox = square_bbox(bbox, pad)
+    x1, y1, x2, y2 = bbox[..., 0], bbox[..., 1], bbox[..., 2], bbox[..., 3]
+    if x1 < 0:
+        x1 = 0
+        x2 = min(x2 + 0 - x1, Xmax - 1)
+    if x2 >= Xmax-1:
+        x2 = min(Xmax - 1, x2)
+        x1 = max(0, x1 - (Xmax - 1 - x2))
+    if y1 < 0:
+        y1 = 0
+        y2 = min(y2 + 0 - y1, Ymax - 1)
+    if y2 >= Ymax-1:
+        y2 = Ymax - 1
+        y1 = max(0, y1 - (Ymax - 1 - y2))
+    # intersect 
+    center = np.stack([(x1 + x2) / 2, (y1 + y2) / 2], -1)
+    size = np.array(min((x2 - x1) / 2, (y2 - y1) / 2))[..., None]
+    
+    bbox = np.concatenate([center - size, center + size], -1)
+    return bbox
+
+
 def square_bbox(bbox, pad=0):
     if not torch.is_tensor(bbox):
         is_numpy = True
@@ -249,7 +281,8 @@ def crop_resize(img: np.ndarray, bbox, final_size=224, pad='constant', return_np
     
     img = Image.fromarray(img.astype(np.uint8))
     img = img.crop([min_x, min_y, max_x, max_y])
-    img = img.resize((final_size, final_size))
+    if final_size is not None:
+        img = img.resize((final_size, final_size))
 
     # img_cropped = img[int(min_y):int(max_y), int(min_x):int(max_x)]
     # new_size = max(max_x - min_x, max_y - min_y)
@@ -488,7 +521,7 @@ def merge_gifs(file_list, save_file, size=None, axis=1):
 
 
 def save_images(images, fname, text_list=[None], merge=1, col=8, scale=False, bg=None, mask=None, r=0.9,
-                keypoint=None, color=(0, 1, 0)):
+                keypoint=None, color=(0, 1, 0), ext='.png'):
     """
     :param it:
     :param images: Tensor of (N, C, H, W)
@@ -502,14 +535,24 @@ def save_images(images, fname, text_list=[None], merge=1, col=8, scale=False, bg
         images = blend_images(images, bg, mask, r)
     if keypoint is not None:
         images = vis_j2d(images, keypoint, -1, color=color)
+    
+    if merge == 1:
+        merge_image = tensor_text_to_canvas(images, text_list, col=col, scale=scale)
 
-    merge_image = tensor_text_to_canvas(images, text_list, col=col, scale=scale)
-
-    if fname is not None:
-        if not os.path.exists(os.path.dirname(fname)):
-            os.makedirs(os.path.dirname(fname))
-        imageio.imwrite(fname + '.png', merge_image)
-    return merge_image
+        if fname is not None:
+            if not os.path.exists(os.path.dirname(fname)):
+                os.makedirs(os.path.dirname(fname), exist_ok=True)
+            imageio.imwrite(fname + ext, merge_image)
+        return merge_image
+    elif merge == 0:
+        if scale:
+            images = images / 2 + 0.5
+        images = images.cpu().detach()  # N, C, H, W
+        os.makedirs(fname, exist_ok=True)
+        for i, image in enumerate(images):
+            image = image.numpy().transpose([1, 2, 0])
+            image = np.clip(255 * image, 0, 255).astype(np.uint8)
+            imageio.imwrite(osp.join(fname, '%02d%s' % (i, ext)), image)
 
 
 def save_heatmap(image, fname, merge=1, col=8, scale=False):
@@ -727,7 +770,7 @@ def write_gif(image_list, gif_name):
     print('save to ', gif_name + '.gif')
 
 
-def write_mp4(video, save_file, ffmpeg_dir='~/.local/bin/'):
+def write_mp4(video, save_file, ffmpeg_dir='/usr/bin/', fps=10):
     tmp_dir = save_file + '.tmp'
     os.makedirs(tmp_dir, exist_ok=True)
     for t, image in enumerate(video):
@@ -736,7 +779,7 @@ def write_mp4(video, save_file, ffmpeg_dir='~/.local/bin/'):
     if osp.exists(save_file + '.mp4'):
         os.system('rm %s.mp4' % (save_file))
     src_list_dir = osp.join(tmp_dir, '%02d.jpg')
-    cmd = ffmpeg_dir + 'ffmpeg -framerate 10 -i %s -c:v libx264 -pix_fmt yuv420p %s.mp4' % (src_list_dir, save_file)
+    cmd = ffmpeg_dir + 'ffmpeg -framerate %d -i %s -c:v libx264 -pix_fmt yuv420p %s.mp4' % (fps, src_list_dir, save_file)
     cmd += ' -hide_banner -loglevel error'
     print(cmd)
     os.system(cmd)
