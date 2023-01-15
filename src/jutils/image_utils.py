@@ -14,8 +14,7 @@ import numpy as np
 import torch
 import torchvision.utils as vutils
 from PIL import Image
-# from IPython import display
-from skimage import measure
+from IPython import display
 
 
 def mask_to_bbox(mask, mode='minmax', rate=1):
@@ -142,45 +141,6 @@ def jitter_bbox(bbox, s_stdev, t_stdev):
     bbox[0:2] = center - new_size / 2
     bbox[2:4] = center + new_size / 2   
     return bbox 
-
-def pad_bbox(bbox, pad=0):
-    if not torch.is_tensor(bbox):
-        is_numpy = True
-        bbox = torch.FloatTensor(bbox)
-    else:
-        is_numpy = False
-
-    x1y1, x2y2 = bbox[..., :2], bbox[..., 2:]
-    center = (x1y1 + x2y2) / 2 
-    half_xy = (x2y2 - x1y1) / 2
-    half_xy = half_xy * (1 + 2 * pad)
-    bbox = torch.cat([center - half_xy, center + half_xy], dim=-1)
-    if is_numpy:
-        bbox = bbox.cpu().detach().numpy()
-    return bbox
-
-    
-def square_bbox_no_black(bbox, Ymax, Xmax, pad=0):
-    bbox = square_bbox(bbox, pad)
-    x1, y1, x2, y2 = bbox[..., 0], bbox[..., 1], bbox[..., 2], bbox[..., 3]
-    if x1 < 0:
-        x1 = 0
-        x2 = min(x2 + 0 - x1, Xmax - 1)
-    if x2 >= Xmax-1:
-        x2 = min(Xmax - 1, x2)
-        x1 = max(0, x1 - (Xmax - 1 - x2))
-    if y1 < 0:
-        y1 = 0
-        y2 = min(y2 + 0 - y1, Ymax - 1)
-    if y2 >= Ymax-1:
-        y2 = Ymax - 1
-        y1 = max(0, y1 - (Ymax - 1 - y2))
-    # intersect 
-    center = np.stack([(x1 + x2) / 2, (y1 + y2) / 2], -1)
-    size = np.array(min((x2 - x1) / 2, (y2 - y1) / 2))[..., None]
-    
-    bbox = np.concatenate([center - size, center + size], -1)
-    return bbox
 
 
 def square_bbox(bbox, pad=0):
@@ -788,7 +748,7 @@ def write_gif(image_list, gif_name):
     print('save to ', gif_name + '.gif')
 
 
-def write_mp4(video, save_file, ffmpeg_dir='/usr/bin/', fps=10):
+def write_mp4(video, save_file):
     tmp_dir = save_file + '.tmp'
     os.makedirs(tmp_dir, exist_ok=True)
     for t, image in enumerate(video):
@@ -797,7 +757,7 @@ def write_mp4(video, save_file, ffmpeg_dir='/usr/bin/', fps=10):
     if osp.exists(save_file + '.mp4'):
         os.system('rm %s.mp4' % (save_file))
     src_list_dir = osp.join(tmp_dir, '%02d.jpg')
-    cmd = ffmpeg_dir + 'ffmpeg -framerate %d -i %s -c:v libx264 -pix_fmt yuv420p %s.mp4' % (fps, src_list_dir, save_file)
+    cmd = 'ffmpeg -framerate 10 -i %s -c:v libx264 -pix_fmt yuv420p %s.mp4' % (src_list_dir, save_file)
     cmd += ' -hide_banner -loglevel error'
     print(cmd)
     os.system(cmd)
