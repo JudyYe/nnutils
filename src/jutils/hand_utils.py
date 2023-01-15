@@ -108,7 +108,7 @@ def get_mean_pose(model='mano', tensor=True, device='cpu'):
 
 
 class ManopthWrapper(nn.Module):
-    def __init__(self, mano_path='/ws-judyye/output/mano', **kwargs):
+    def __init__(self, mano_path='/home/yufeiy2/scratch/pretrain/smpl/mano_v1_2/models', **kwargs):
         super().__init__()
         self.mano_layer_right = ManoLayer(
             mano_root=mano_path, side='right', use_pca=kwargs.get('use_pca', False), ncomps=kwargs.get('ncomps', 45),
@@ -130,8 +130,8 @@ class ManopthWrapper(nn.Module):
         self.register_buffer('contact_index' , torch.LongTensor(contact_list))
 
         # load uv map
-        print('uv map', kwargs.get('uv', 'open_hand_uv') + '.obj')
-        rtn = load_obj(osp.join(mano_path, kwargs.get('uv', 'open_hand_uv') + '.obj'))
+        print('uv map', kwargs.get('uv', 'MANO_UV_right') + '.obj')
+        rtn = load_obj(osp.join(mano_path, kwargs.get('uv', 'MANO_UV_right') + '.obj'))
         self.register_buffer('verts_uv', rtn[2].verts_uvs[None])
         self.register_buffer('faces_uv', rtn[1].textures_idx[None])
     
@@ -169,7 +169,7 @@ class ManopthWrapper(nn.Module):
                 trans = torch.zeros([N, 3], device=device)
             if art_pose.size(-1) == 45:
                 art_pose = torch.cat([axisang, art_pose], -1)
-            verts, joints, faces = self._forward_layer(art_pose, trans)
+            verts, joints, faces = self._forward_layer(art_pose, trans, **kwargs)
 
             if glb_se3 is not None:
                 if glb_se3.ndim == 3 and glb_se3.shape[-1] == 4:
@@ -180,9 +180,9 @@ class ManopthWrapper(nn.Module):
                 verts = trans.transform_points(verts)
                 joints = trans.transform_points(joints)
         else:  # inner translation
-            if axisang is None:
-                axisang = torch.zeros([N, 3], device=device)
-            art_pose = torch.cat([axisang, art_pose], -1)
+            # if axisang is None:
+            #     axisang = torch.zeros([N, 3], device=device)
+            # art_pose = torch.cat([axisang, art_pose], -1)
             # if axisang is not None:
                 # art_pose = torch.cat([axisang, art_pose], -1)
             if trans is None:
