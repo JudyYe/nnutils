@@ -200,19 +200,37 @@ def square_bbox(bbox, pad=0):
     return bbox
 
 
-def crop_cam_intr(cam_intr, bbox_sq, H):
-    x1y1 = bbox_sq[..., 0:2]
+def crop_cam_intr(cam_intr, bbox_sq, dshape=None):
+    """
+    H: the resized shape
+    @return: 
+        a intrinsics with origin at top left corner, for images in shape of (dshape)
+    """
+    x1y1 = bbox_sq[..., 0:2]  # (..., 2)
     dxy = bbox_sq[..., 2:] - bbox_sq[..., 0:2]
-    t_mat = torch.FloatTensor([
-        [1, 0, -x1y1[0]],
-        [0, 1, -x1y1[1]],
-        [0, 0, 1],
-    ]).to(cam_intr)
-    s_mat = torch.FloatTensor([
-        [H / dxy[0], 0, 0],
-        [0, H / dxy[1], 0],
-        [0, 0, 1],
-    ]).to(cam_intr)
+    if dshape is None:
+        dshape = dxy
+    elif isinstance(dshape, int):
+        H = W = dshape
+    elif isinstance(dshape, tuple):
+        H, W = dshape
+    elif torch.is_tensor(dshape):
+        H, W = dshape.split([1, 1], -1)
+    
+    
+    rest_dim = cam_intr[..., 0:1, 0]  # (..., 1)
+    ones = torch.ones_like(rest_dim)
+    zeros = torch.zeros_like(rest_dim)
+    t_mat = torch.cat([
+       torch.stack([ones, zeros, -x1y1[..., 0:1]], -1),   # (..., 1, new_1)
+       torch.stack([zeros, ones, -x1y1[..., 1:2]], -1), 
+       torch.stack([zeros, zeros, ones], -1), 
+    ], dim=-2)
+    s_mat = torch.cat([
+        torch.stack([H / dxy[..., 0:1], zeros, zeros], -1),
+        torch.stack([zeros, H / dxy[..., 1:2], zeros], -1),
+        torch.stack([zeros, zeros, ones], -1),
+    ], dim=-2)
     mat = s_mat @ t_mat @ cam_intr
     return mat
 

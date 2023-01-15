@@ -3,52 +3,53 @@
 # --------------------------------------------------------
 from __future__ import print_function
 
-import logging
+import collections
 import functools
+import logging
 import os
 import os.path as osp
 import pickle
+import re
 import time
-from typing import List, Tuple, Union, Callable
-from pytorch3d.renderer.lighting import  AmbientLights
-from pytorch3d.renderer.mesh.shader import HardPhongShader,  SoftPhongShader
-from pytorch3d.renderer.mesh.shading import flat_shading
-import skimage.measure
+from typing import Callable, List, Tuple, Union
 
 import numpy as np
+import skimage.measure
+from pytorch3d.renderer.lighting import AmbientLights
+from pytorch3d.renderer.mesh.shader import HardPhongShader, SoftPhongShader
 from scipy.spatial.distance import cdist
-import re
 from torch._six import string_classes
-import collections.abc as container_abcs
+
 int_classes = int
+np_str_obj_array_pattern = re.compile(r'[SaUO]')
 
 
-import trimesh
+import pytorch3d.io as io3d
+import pytorch3d.ops as ops_3d
+import pytorch3d.structures
+import pytorch3d.structures.utils as struct_utils
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import pytorch3d.io as io3d
-import pytorch3d.ops as ops_3d
-
-import pytorch3d.structures
-import pytorch3d.structures.utils as struct_utils
+import trimesh
+from pytorch3d.renderer import (AlphaCompositor, BlendParams,
+                                DirectionalLights, MeshRasterizer,
+                                PerspectiveCameras,
+                                PointsRasterizationSettings, PointsRasterizer,
+                                PointsRenderer, RasterizationSettings,
+                                TexturesUV, TexturesVertex)
 from pytorch3d.structures import Pointclouds
 from pytorch3d.structures.meshes import join_meshes_as_batch
-from pytorch3d.transforms import Transform3d, euler_angles_to_matrix, Rotate, Scale, Translate
-from pytorch3d.renderer import (
-    MeshRasterizer, PointsRasterizer,
-    PointsRenderer,
-    DirectionalLights,
-    TexturesUV, TexturesVertex,
-    AlphaCompositor, 
-    RasterizationSettings, PointsRasterizationSettings, PerspectiveCameras, BlendParams,
-    )
+from pytorch3d.transforms import (Rotate, Scale, Transform3d, Translate,
+                                  euler_angles_to_matrix)
 from trimesh.base import Trimesh
 from trimesh.voxel.base import VoxelGrid
-from . import image_utils, geom_utils
-from .layers import grid_sample
 
+from . import geom_utils, image_utils
+from .layers import grid_sample
 from .my_pytorch3d import Meshes, chamfer_distance
+
+
 # ### Mesh IO Utils ###
 def meshfile_to_glb(mesh_file, out_file):
     mesh = trimesh.load(mesh_file)  
@@ -224,6 +225,28 @@ def load_mesh_from_np(vertices, faces, device='cpu', scale_rgb=255, texture=None
     return mesh
 
 
+def get_color(color='white', device='cpu'):
+    """
+
+    :param color: str or in shape of (N, V, 3), or (1, 1, 3?)
+    :param device: _description_, defaults to 'cpu'
+    :return: _description_
+    """
+    color255_dict = {
+        'white': [255, 255, 255],
+        'blue': [183,216,254],
+        'red': [254,216/2,183/2],
+        'yellow': [240, 207, 192], 
+    }
+    if isinstance(color, 'str'):
+        feature = torch.FloatTensor(color255_dict[color]).reshape(1, 1, 3) / 255
+    elif not torch.is_tensor(color):
+        feature = torch.FloatTensor(color).reshape(1, 1, 3) / 255
+    elif torch.is_tensor(color):
+        feature = color
+    return feature
+
+
 def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex:
     """
     :param meshes:
@@ -236,8 +259,12 @@ def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex
         feature = torch.ones_like(meshes.verts_padded())
     elif feature == 'blue':
         feature = torch.zeros_like(meshes.verts_padded())
-        color = torch.FloatTensor([[[203,238,254]]]).to(meshes.device)  / 255   
+        # color = torch.FloatTensor([[[203,238,254]]]).to(meshes.device)  / 255   
         color = torch.FloatTensor([[[183,216,254]]]).to(meshes.device)  / 255 # * s - s/2
+        feature = feature + color
+    elif feature == 'red':
+        feature = torch.zeros_like(meshes.verts_padded())
+        color = torch.FloatTensor([[[254,216/2,183/2]]]).to(meshes.device)  / 255 # * s - s/2
         feature = feature + color
     elif feature == 'yellow':
         feature = torch.zeros_like(meshes.verts_padded())
@@ -258,127 +285,6 @@ def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex
     texture._N = meshes._N
     texture.valid = meshes.valid
     return texture
-
-
-# ### Gripper Utils ###
-def gripper_mesh(se3=None, mat=None, texture=None, return_mesh=True):
-    """
-    :param se3: (N, 6)
-    :param mat:
-    :return:
-    """
-    if mat is None:
-        mat = geom_utils.se3_to_matrix(se3)  # N, 4, 4
-    device = mat.device
-
-    verts, faces = create_gripper(mat.device)  # (1, V, 3), (1, V, 3)
-    t = Transform3d(matrix=mat.transpose(1, 2), device=device)
-
-    verts = t.transform_points(verts)
-    faces = faces.expand(mat.size(0), faces.size(1), 3)
-
-    if texture is not None:
-        texture = texture.unsqueeze(1).to(device) + torch.zeros_like(verts)
-    else:
-        texture = torch.ones_like(verts)
-
-    if return_mesh:
-        return Meshes(verts, faces, TexturesVertex(texture))
-    else:
-        return verts, faces, texture
-
-
-# ### Primitives Utils ###
-def create_cube(device, N=1, align='center'):
-    """
-    :return: verts: (1, 8, 3) faces: (1, 12, 3)
-    """
-    cube_verts = torch.tensor(
-        [
-            [0, 0, 0],
-            [0, 0, 1],
-            [0, 1, 0],
-            [0, 1, 1],
-            [1, 0, 0],
-            [1, 0, 1],
-            [1, 1, 0],
-            [1, 1, 1],
-        ],
-        dtype=torch.float32,
-        device=device,
-    )
-    if align == 'center':
-        cube_verts -= .5
-
-    # faces corresponding to a unit cube: 12x3
-    cube_faces = torch.tensor(
-        [
-            [0, 1, 2],
-            [1, 3, 2],  # left face: 0, 1
-            [2, 3, 6],
-            [3, 7, 6],  # bottom face: 2, 3
-            [0, 2, 6],
-            [0, 6, 4],  # front face: 4, 5
-            [0, 5, 1],
-            [0, 4, 5],  # up face: 6, 7
-            [6, 7, 5],
-            [6, 5, 4],  # right face: 8, 9
-            [1, 7, 3],
-            [1, 5, 7],  # back face: 10, 11
-        ],
-        dtype=torch.int64,
-        device=device,
-    )  # 12, 3
-
-    return cube_verts.unsqueeze(0).expand(N, 8, 3), cube_faces.unsqueeze(0).expand(N, 12, 3)
-
-
-def create_gripper(device, N=1):
-    """
-    :param: texture: (N, 3) in scale [-1, 1] or None
-    :return: torch.Tensor in shape of (N, V, 3), (N, V, 3)"""
-    scale = Scale(torch.tensor(
-        [
-            [0.005, 0.005, 0.139],
-            [0.005, 0.005, 0.07],
-            [0.005, 0.005, 0.06],
-            [0.005, 0.005, 0.06],
-        ], dtype=torch.float32, device=device
-    ), device=device)
-    translate = Translate(torch.tensor(
-        [
-            [-0.03, 0, 0, ],
-            [-0.065, 0, 0, ],
-            [0, 0, 0.065, ],
-            [0, 0, -0.065, ],
-        ], dtype=torch.float32, device=device
-    ), device=device)
-    rot = Rotate(euler_angles_to_matrix(torch.tensor(
-        [
-            [0, 0, 0],
-            [0, np.pi / 2, 0],
-            [0, np.pi / 2, 0],
-            [0, np.pi / 2, 0],
-        ], dtype=torch.float32, device=device
-    ), 'XYZ'), device=device)
-    align = Rotate(euler_angles_to_matrix(torch.tensor(
-        [
-            [np.pi / 2, 0, 0],
-        ], dtype=torch.float32, device=device
-    ), 'XYZ'), device=device)
-    # X -> scale -> R -> t, align
-    transform = scale.compose(rot, translate, align)
-
-    each_verts, each_faces, num_cube = 8, 12, 4
-    verts, faces = create_cube(device, num_cube)
-    verts = (transform.transform_points(verts)).view(1, num_cube * each_verts, 3)  # (4, 8, 3) -> (1, 32, 3)
-    offset = torch.arange(0, num_cube, device=device).unsqueeze(-1).unsqueeze(-1) * each_verts  # faces offset
-    faces = (faces + offset).view(1, num_cube * each_faces, 3)
-
-    verts = verts.expand(N, num_cube * each_verts, 3)
-    faces = faces.expand(N, num_cube * each_faces, 3)
-
-    return verts, faces
 
 
 # ### Pointcloud to meshes Utils ###
@@ -1080,6 +986,20 @@ def weak_to_full_persp(f, pp, scale, trans):
     translate = torch.cat([trans - pp / scale, f / scale], -1)
     return translate
 
+
+def extr_between_opengl_to_py3d(cTw=None, wTc=None):
+    """flip +z -z -- rotate around x by 180 degree"""
+    ccTc = torch.FloatTensor([[[1, 0, 0],
+        [0, -1, 0],
+        [0, 0, -1]]])
+    if cTw is not None:
+        cTw = geom_utils.rt_to_homo(ccTc) @ cTw
+        return cTw
+    if wTc is not None:
+        wTc = wTc @ geom_utils.rt_to_homo(ccTc) 
+        return wTc
+
+
 def intr_from_ndc_to_screen(ndc_intr, H, W):
     """-1, 1 --> 0, H, it's essentially affine transformation.... 
     """
@@ -1099,6 +1019,12 @@ def intr_from_screen_to_ndc(pix_intr, H, W):
     """0,H --> -1, 1"""
     N = len(pix_intr)
     device = pix_intr.device
+    dim_h, dim_w = pix_intr.shape[-2:]
+    if dim_h == 3 and dim_w == 3:
+        pix_intr = geom_utils.rt_to_homo(pix_intr)
+    elif dim_h == 4 and dim_w == 3:
+        raise ValueError('check pix_intr dim, should be 3x4/4x4/3x3')
+
     scale_mat = torch.FloatTensor([[
         [2/W, 0, -1, 0],
         [0, 2/H, -1, 0],
@@ -1106,6 +1032,8 @@ def intr_from_screen_to_ndc(pix_intr, H, W):
         [0, 0, 0, 1],
     ]]).to(device).repeat(N, 1, 1)
     ndc_intr = scale_mat @ pix_intr
+
+    ndc_intr = ndc_intr[..., 0:dim_h, 0:dim_w]
     return ndc_intr
 
 
@@ -1686,16 +1614,9 @@ def convert_sdf_samples_to_ply(
 # #### collate function ####
 
 
+# from torch.utils.data.dataloader import _collate_fn_t
 def collate_meshes(batch):
-    """
-    collate function specifiying Meshes
-    :return:
-    """
-    np_str_obj_array_pattern = re.compile(r'[SaUO]')
-    default_collate_err_msg_format = (
-        "default_collate: batch must contain tensors, numpy arrays, numbers, "
-        "dicts or lists; found {}")
-
+    r"""Puts each data field into a tensor with outer dimension batch size"""
 
     elem = batch[0]
     elem_type = type(elem)
@@ -1704,7 +1625,7 @@ def collate_meshes(batch):
         if torch.utils.data.get_worker_info() is not None:
             # If we're in a background process, concatenate directly into a
             # shared memory tensor to avoid an extra copy
-            numel = sum([x.numel() for x in batch])
+            numel = sum(x.numel() for x in batch)
             storage = elem.storage()._new_shared(numel)
             out = elem.new(storage)
         return torch.stack(batch, 0, out=out)
@@ -1713,8 +1634,7 @@ def collate_meshes(batch):
         return meshes
     elif elem_type.__module__ == 'numpy' and elem_type.__name__ != 'str_' \
             and elem_type.__name__ != 'string_':
-        elem = batch[0]
-        if elem_type.__name__ == 'ndarray':
+        if elem_type.__name__ == 'ndarray' or elem_type.__name__ == 'memmap':
             # array of string classes and object
             if np_str_obj_array_pattern.search(elem.dtype.str) is not None:
                 raise TypeError(default_collate_err_msg_format.format(elem.dtype))
@@ -1728,11 +1648,11 @@ def collate_meshes(batch):
         return torch.tensor(batch)
     elif isinstance(elem, string_classes):
         return batch
-    elif isinstance(elem, container_abcs.Mapping):
-        return  {key: collate_meshes([d[key] for d in batch]) for key in elem}
+    elif isinstance(elem, collections.abc.Mapping):
+        return {key: collate_meshes([d[key] for d in batch]) for key in elem}
     elif isinstance(elem, tuple) and hasattr(elem, '_fields'):  # namedtuple
         return elem_type(*(collate_meshes(samples) for samples in zip(*batch)))
-    elif isinstance(elem, container_abcs.Sequence):
+    elif isinstance(elem, collections.abc.Sequence):
         # check to make sure that the elements in batch have consistent size
         it = iter(batch)
         elem_size = len(next(it))
@@ -1742,7 +1662,6 @@ def collate_meshes(batch):
         return [collate_meshes(samples) for samples in transposed]
 
     raise TypeError(default_collate_err_msg_format.format(elem_type))
-
 
 
 def test_end_fscore(outputs, save_dir, suf='', head=''):
@@ -1932,36 +1851,3 @@ def sample_unit_cube(hObj, num_points, r=1):
         return handle
 
 
-if __name__ == '__main__':
-    from nnutils import image_utils
-    import numpy as np
-
-    device = 'cuda:0'
-    mat = torch.eye(4, dtype=torch.float32, device=device).unsqueeze(0)
-    meshes = gripper_mesh(mat=mat)
-    save_dir = '/glusterfs/yufeiy2/hoi_output/vis/'
-    os.makedirs(save_dir, exist_ok=True)
-
-    # image_list = render_geom_rot(meshes, scale_geom=True)
-    # image_utils.save_gif(image_list, os.path.join(save_dir, 'gripper_s.png'))
-    # image_list = render_geom_rot(meshes)
-    # image_utils.save_gif(image_list, os.path.join(save_dir, 'gripper.png'))
-
-    for index in range(2):
-        pkl = np.load(os.path.join(save_dir, 'grasp_%d.npz' % index))
-        obj = np.array(pkl['obj'])
-        N = obj.shape[0];
-        T = np.prod(obj.shape) // N // 9
-        grasp = np.array(pkl['grasp'])  # 8, (n,), 9
-
-        obj = torch.tensor(obj, dtype=torch.float32, device=device)
-        grasp = torch.tensor(grasp, dtype=torch.float32, device=device)
-
-        xyz, feature = obj.split([3, 3], dim=-1)
-        obj_meshes = pc_to_cubic_meshes(xyz, feature / 255 * 2 - 1)
-        image_utils.save_gif(render_geom_rot(obj_meshes, scale_geom=True), '%s/%d_obj.png' % (save_dir, index))
-        gripper = gripper_mesh(grasp)
-        image_utils.save_gif(render_geom_rot(gripper, scale_geom=True), '%s/%d_gripper.png' % (save_dir, index))
-
-        scene = join_scene([obj_meshes, gripper])
-        image_utils.save_gif(render_geom_rot(scene, scale_geom=True), '%s/%d_scene.png' % (save_dir, index))
