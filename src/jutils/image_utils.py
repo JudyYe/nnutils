@@ -14,8 +14,7 @@ import numpy as np
 import torch
 import torchvision.utils as vutils
 from PIL import Image
-from IPython import display
-
+from skimage import measure
 
 def mask_to_bbox(mask, mode='minmax', rate=1):
     """
@@ -1157,11 +1156,6 @@ def blur(image, k, mask):
     return out
 
 ########################
-def display_gif(filename):
-    with open(filename,'rb') as f:
-        display.display(display.Image(data=f.read(), format='png'))    
-    # display.Image(filename="%s.png" % filename)
-
 
 def save_image(image, fname):
     os.makedirs(osp.dirname(fname), exist_ok=True)

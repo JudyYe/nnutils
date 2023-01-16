@@ -36,6 +36,8 @@ def slurm_wrapper_hydra(args, callable_fn):
         if args.environment.exclude_nodes != "":
             additional_parameters.update(
                 {"exclude": args.environment.exclude_nodes.replace('+', ',')})
+        if args.environment.gpu_mem_gb is not None:
+            additional_parameters['mem_per_gpu'] = args.environment.gpu_mem_gb
         args.environment.workers = 10 * args.environment.ngpu
         executor.update_parameters(
             timeout_min=args.environment.slurm_timeout,

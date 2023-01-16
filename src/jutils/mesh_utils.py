@@ -287,51 +287,6 @@ def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex
     return texture
 
 
-# ### Pointcloud to meshes Utils ###
-def pc_to_cubic_meshes(xyz: torch.Tensor = None, feature: torch.Tensor = None, pc: Pointclouds = None,
-                       align='center', eps=None) -> Meshes:
-    if pc is None:
-        if feature is None:
-            feature = torch.ones_like(xyz)
-        pc = Pointclouds(xyz, features=feature)
-    device = pc.device
-    if pc.isempty():
-        N = len(pc)
-        zeros = torch.zeros([N, 0, 3], device=device)
-        meshes = Meshes(zeros, zeros, textures=TexturesVertex(zeros))
-    else:
-        N, V, D = pc.features_padded().size()
-
-        norm = torch.sqrt(torch.sum(pc.points_padded() ** 2, dim=-1, keepdim=True))
-        std = torch.std(norm, dim=1, keepdim=True)  # (N, V, 3)
-        if eps is None:
-            eps = (std / 10).clamp(min=5e-3)  # N, 1, 1
-        # eps = .1
-
-        cube_verts, cube_faces = create_cube(device, align=align)
-
-        num = pc.num_points_per_cloud()  # (N, )
-
-        faces_list = [cube_faces.expand(num_e, 12, 3) for num_e in num]
-        faces_offset = [torch.arange(0, num_e, device=device).unsqueeze(-1).unsqueeze(-1) * 8 for num_e in num]
-        faces_list = [(each_f + each_off).view(-1, 3) for each_f, each_off in zip(faces_list, faces_offset)]
-
-        verts = cube_verts.expand(N, 8, 3) + torch.randn([N, 8, 3], device=device) * 0.01  # (1, 8, 3)
-        verts = pc.points_padded().unsqueeze(-2) + (verts * eps).unsqueeze(1)  # N, 8, 3  -> N, V, 8, 3
-        verts = verts.view(N, V * 8, 3)
-
-        num8_list = (num * 8).tolist()
-        verts_list = struct_utils.padded_to_list(verts, num8_list)
-
-        feature = pc.features_padded().unsqueeze(-2).expand(N, V, 8, D).reshape(N, V * 8, D)
-        feature_list = struct_utils.padded_to_list(feature, num8_list)
-        texture = TexturesVertex(feature_list)
-
-        meshes = Meshes(verts_list, faces_list, texture)
-
-    return meshes
-
-
 # ### Render Utils ###
 
 def huber(x, y, scaling=0.1):
