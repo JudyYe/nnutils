@@ -115,7 +115,7 @@ class ManopthWrapper(nn.Module):
             flat_hand_mean=kwargs.get('flat_hand_mean', True))
         self.metric = kwargs.get('metric', 1)
         
-        self.register_buffer('hand_faces', self.mano_layer_right.th_faces.unsqueeze(0))
+        # self.register_buffer('hand_faces', self.mano_layer_right.th_faces.unsqueeze(0))
         self.register_buffer('hand_mean', torch.FloatTensor(self.mano_layer_right.smpl_data['hands_mean']).unsqueeze(0))
         self.register_buffer('t_mano', torch.tensor([[0.09566994, 0.00638343, 0.0061863]], dtype=torch.float32, ))
         self.register_buffer('th_selected_comps', torch.FloatTensor(self.mano_layer_right.smpl_data['hands_components']))
@@ -130,10 +130,16 @@ class ManopthWrapper(nn.Module):
         self.register_buffer('contact_index' , torch.LongTensor(contact_list))
 
         # load uv map
-        print('uv map', kwargs.get('uv', 'MANO_UV_right') + '.obj')
-        rtn = load_obj(osp.join(mano_path, kwargs.get('uv', 'MANO_UV_right') + '.obj'))
+        fname = osp.join(mano_path, kwargs.get('uv', 'MANO_UV_right'))
+        if kwargs.get('closed', True):
+            if osp.exists(fname + '_closed.obj'):
+                fname = fname + '_closed'
+            else:
+                print('### Warning! hand mesh not closed.')
+        rtn = load_obj(fname + '.obj')
         self.register_buffer('verts_uv', rtn[2].verts_uvs[None])
         self.register_buffer('faces_uv', rtn[1].textures_idx[None])
+        self.register_buffer('hand_faces', rtn[1].verts_idx[None])
     
     def to_palm(self, rot, hA, add_pca=False, return_mesh=True):
         if add_pca:

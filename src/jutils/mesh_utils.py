@@ -444,7 +444,7 @@ def fragment_to_shader(fragments, meshes, cameras, rgb_mode=True, depth_mode=Fal
 
 
 
-def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwargs):
+def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, normal_mode=False, **kwargs):
     """
     flip issue: https://github.com/facebookresearch/pytorch3d/issues/78
     :param meshes:
@@ -488,7 +488,23 @@ def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, **kwar
         zbuf = flip_transpose_canvas(zbuf, False)
         out['depth'] = zbuf
 
+    if normal_mode:
+        out['normal'] =  normal_shading(meshes, fragments) 
+        out['normal'] = flip_transpose_canvas(out['normal'], False)
+        out['normal'][:, 1:3] *= -1 # xyz points to left, up, outward
+        # need to inverse x? 
     return out
+
+
+def normal_shading(meshes, fragments):
+    faces = meshes.faces_packed()  # (F, 3)
+    vertex_normals = meshes.verts_normals_packed()  # (V, 3)
+    faces_normals = vertex_normals[faces]
+    pixel_normals = ops_3d.interpolate_face_attributes(
+        fragments.pix_to_face, fragments.bary_coords, faces_normals)
+
+    pixel_normals = pixel_normals[..., 0, :]
+    return pixel_normals
 
 
 def render_soft(meshes: Meshes, cameras: PerspectiveCameras, 
@@ -918,6 +934,33 @@ def depth_to_pc(depth, image: torch.Tensor=None, cameras=None, mask=None, scale=
 
 
 # ######## Camera utils ########
+def sample_camera_extr_like(wTc=None, cTw=None, t_std=0, s_std=0):
+    """sample a camera wTc on a sphere with the same distence and scale factor, 
+        wo requiring camera pointing up
+    :param wTc: _description_
+    :param t_std: translation range, if sets, will perturb camera dist uniformly between 1 \pm t_std
+    :return: _description_
+    """
+    rtn_wTc = True
+    if wTc is None:
+        rtn_wTc = False
+        wTc = geom_utils.inverse_rt(mat=cTw, return_mat=True)
+    # world j hans included scene box, so has scale factor.
+    _, scale = geom_utils.mat_to_scale_rot(wTc[..., :3, :3])
+    # switch jTc with a sampled point on sphere
+    rot_T = geom_utils.random_rotations(len(wTc), device=wTc.device).reshape(len(wTc), 3, 3)
+    norm = get_camera_dist(wTc=wTc)  # we want to get camera dist, and put it to -z? 
+    if t_std > 0:
+        noise = torch.rand_like(norm) * t_std * 2 - t_std
+        norm += noise
+    zeros = torch.zeros_like(norm)
+    trans = torch.stack([zeros, zeros, norm], -1).unsqueeze(-1)
+    wTc = geom_utils.rt_to_homo(rot_T, -rot_T@trans, scale)  
+    if rtn_wTc:
+        return wTc     
+    return geom_utils.inverse_rt(mat=wTc, return_mat=True)
+
+
 def weak_to_full_persp(f, pp, scale, trans):
     """
     Args:

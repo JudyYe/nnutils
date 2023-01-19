@@ -424,6 +424,7 @@ def mask_to_points(masks, P):
     return points
 
 
+
 # ######################## Visualization code ########################
 def read_mp4(filename):
     vid = imageio.get_reader(filename,  'ffmpeg')
@@ -495,6 +496,7 @@ def merge_gifs(file_list, save_file, size=None, axis=1):
         canvas_list.append(canvas)
     write_mp4(canvas_list, save_file)
     return canvas_list
+
 
 
 def save_images(images, fname, text_list=[None], merge=1, col=8, scale=False, bg=None, mask=None, r=0.9,
