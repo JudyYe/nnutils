@@ -28,11 +28,21 @@ def load_my_state_dict(model: torch.nn.Module, state_dict, lambda_own=lambda x: 
         if n not in record:
             missing_keys.append(n)
     
-    logging.warn('Unexpected keys' + str(unexpected_keys))
-    logging.warn('Missing keys' + str(missing_keys))
-    logging.warn('Size mismatched keys' + str(mismatch_keys))
+    if unexpected_keys: logging.warn('Unexpected keys' + str(unexpected_keys))
+    if missing_keys: logging.warn('Missing keys' + str(missing_keys))
+    if mismatch_keys: logging.warn('Size mismatched keys' + str(mismatch_keys))
     return missing_keys, unexpected_keys, mismatch_keys
     
+def deep_to(data, device='cuda'):
+    if hasattr(data, 'to'):
+        return data.to(device)
+    if isinstance(data, list):
+        for i, d in enumerate(data):
+            data[i] = deep_to(d, device)
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            data[k] = deep_to(v, device)
+    return data
 
 def to_cuda(data, device='cuda'):
     new_data = {}

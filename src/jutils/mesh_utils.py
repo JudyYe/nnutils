@@ -444,7 +444,12 @@ def fragment_to_shader(fragments, meshes, cameras, rgb_mode=True, depth_mode=Fal
 
 
 
-def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, normal_mode=False, **kwargs):
+def render_mesh(meshes: Meshes, cameras, 
+                rgb_mode=True, 
+                depth_mode=False, 
+                normal_mode=False, 
+                uv_mode=False, 
+                **kwargs):
     """
     flip issue: https://github.com/facebookresearch/pytorch3d/issues/78
     :param meshes:
@@ -458,6 +463,7 @@ def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, normal
                                  RasterizationSettings(
                                      image_size=image_size, 
                                      faces_per_pixel=2,
+                                     bin_size=0,
                                      cull_backfaces=False))
     device = cameras.device
 
@@ -488,12 +494,49 @@ def render_mesh(meshes: Meshes, cameras, rgb_mode=True, depth_mode=False, normal
         zbuf = flip_transpose_canvas(zbuf, False)
         out['depth'] = zbuf
 
+    if uv_mode: 
+        uv = hard_uv_shading(meshes, fragments,) 
+        uv = flip_transpose_canvas(uv, False)
+        out['uv'] = uv  # (N, 2, H, W)
+
     if normal_mode:
         out['normal'] =  normal_shading(meshes, fragments) 
         out['normal'] = flip_transpose_canvas(out['normal'], False)
         out['normal'][:, 1:3] *= -1 # xyz points to left, up, outward
         # need to inverse x? 
     return out
+
+
+def hard_uv_shading(meshes: Meshes, fragments):
+    """copy from TexturesUV.sample_textures"""
+    assert isinstance(meshes.textures, TexturesUV), type(meshes.textures)
+
+    tex = meshes.textures
+    packing_list = [
+        i[j] for i, j in zip(tex.verts_uvs_list(), tex.faces_uvs_list())
+    ]
+    faces_verts_uvs = torch.cat(packing_list)
+
+    pixel_uvs = ops_3d.interpolate_face_attributes(
+        fragments.pix_to_face, fragments.bary_coords, faces_verts_uvs
+    )
+
+    N, H_out, W_out, K = fragments.pix_to_face.shape
+
+    # pixel_uvs: (N, H, W, K, 2) -> (N, K, H, W, 2) -> (NK, H, W, 2)
+    
+    pixel_uvs = pixel_uvs[..., 0, :]
+    # Textures: (N*K, C, H, W), pixel_uvs: (N*K, H, W, 2)
+    # Now need to format the pixel uvs and the texture map correctly!
+    # From pytorch docs, grid_sample takes `grid` and `input`:
+    #   grid specifies the sampling pixel locations normalized by
+    #   the input spatial dimensions It should have most
+    #   values in the range of [-1, 1]. Values x = -1, y = -1
+    #   is the left-top pixel of input, and values x = 1, y = 1 is the
+    #   right-bottom pixel of input.
+
+    pixel_uvs = pixel_uvs * 2.0 - 1.0
+    return pixel_uvs
 
 
 def normal_shading(meshes, fragments):
@@ -508,7 +551,7 @@ def normal_shading(meshes, fragments):
 
 
 def render_soft(meshes: Meshes, cameras: PerspectiveCameras, 
-    rgb_mode=True, depth_mode=False, xy_mode=False, **kwargs):
+    rgb_mode=True, depth_mode=False, xy_mode=False, normal_mode=False, **kwargs):
     """
     :param meshes:
     :param cameras:
@@ -562,6 +605,11 @@ def render_soft(meshes: Meshes, cameras: PerspectiveCameras,
         iVerts = cameras.transform_points_ndc(cVerts)
         # iVerts[..., 1] *= -1
         out['xy'] = iVerts
+    if normal_mode:
+        out['normal'] =  normal_shading(meshes, fragments) 
+        out['normal'] = flip_transpose_canvas(out['normal'], False)
+        out['normal'][:, 1:3] *= -1 # xyz points to left, up, outward
+
     return out
 
 
@@ -1718,6 +1766,10 @@ def iou(pred, gt, thresh=.5, reduction='none'):
         iou = np.mean(iou)
     return iou.tolist()
 
+def pairwise_dist_sq(a: Meshes, b: Meshes):
+    va = get_verts(a)  # (N, V, 1, 3)
+    vb = get_verts(b)  # (N, 1, U, 3)
+    return torch.sum( (va.unsqueeze(2) - vb.unsqueeze(1))**2 , -1)
 
 def fscore(pred_pts: Meshes, gt_pts: Meshes, trans=None, num_samples=10000, th=None):
     """

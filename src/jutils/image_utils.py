@@ -165,6 +165,8 @@ def crop_cam_intr(cam_intr, bbox_sq, dshape=None):
     @return: 
         a intrinsics with origin at top left corner, for images in shape of (dshape)
     """
+    n_dim = cam_intr.shape[-1]
+
     x1y1 = bbox_sq[..., 0:2]  # (..., 2)
     dxy = bbox_sq[..., 2:] - bbox_sq[..., 0:2]
     if dshape is None:
@@ -190,7 +192,7 @@ def crop_cam_intr(cam_intr, bbox_sq, dshape=None):
         torch.stack([zeros, H / dxy[..., 1:2], zeros], -1),
         torch.stack([zeros, zeros, ones], -1),
     ], dim=-2)
-    mat = s_mat @ t_mat @ cam_intr
+    mat = s_mat @ t_mat @ cam_intr[..., 0:3, 0:3]
     return mat
 
 
@@ -498,6 +500,11 @@ def merge_gifs(file_list, save_file, size=None, axis=1):
     return canvas_list
 
 
+def imwrite(fname, image):
+    os.makedirs(osp.dirname(fname), exist_ok=True)
+    imageio.imwrite(fname, image)
+
+    
 
 def save_images(images, fname, text_list=[None], merge=1, col=8, scale=False, bg=None, mask=None, r=0.9,
                 keypoint=None, color=(0, 1, 0), ext='.png'):
@@ -694,6 +701,7 @@ def save_depth(images, fname, text_list=[None], merge=1, col=8, scale=False, zne
     merge_image = tensor_text_to_canvas(images, text_list, col=col, scale=False)
 
     merge_image = cv2.applyColorMap(merge_image[..., 0], cv2.COLORMAP_JET)
+    merge_image = merge_image[..., ::-1].copy()
     if fname is not None:
         if not os.path.exists(os.path.dirname(fname)):
             os.makedirs(os.path.dirname(fname))

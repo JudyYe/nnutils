@@ -20,17 +20,19 @@ def wrap_cmd(cmd):
         p.wait()
 
 
-def slurm_wrapper_hydra(args, callable_fn):
+def slurm_wrapper_hydra(args, callable_fn, debug=False):
     """name matching for hydra environment"""
     if args.environment.slurm:
         executor = submitit.AutoExecutor(
-            folder=args.logging.submitit_dir,
+            folder=args.environment.submitit_dir,
             slurm_max_num_timeout=100,
             cluster=None if args.environment.slurm else "debug",
         )
         # asks SLURM to send USR1 signal 30 seconds before the time limit
-        # additional_parameters = {"signal": 'USR1@120'}
-        additional_parameters = {"signal": 'SIGUSR1@90'}
+        additional_parameters = {}
+        additional_parameters = {"signal": 'SIGUSR2@30'}
+        
+        # additional_parameters = {"signal": 'SIGUSR1@90'}
         if args.environment.nodelist != "":
             additional_parameters = {"nodelist": args.environment.nodelist}
         if args.environment.exclude_nodes != "":
@@ -49,8 +51,13 @@ def slurm_wrapper_hydra(args, callable_fn):
             mem_gb=args.environment.mem_gb,
             slurm_additional_parameters=additional_parameters,
             signal_delay_s=120)
-        executor.update_parameters(name=args.expname+args.logging.suffix)
+        executor.update_parameters(name=args.expname)
         job = executor.submit(callable_fn, args)
+        if debug:
+            print('submit job')
+            time.sleep(10)
+            job._interrupt(timeout=True)        
+            print('interrupt')
         if not args.environment.slurm:
             job.result()
     else:
@@ -98,6 +105,9 @@ def slurm_wrapper(args, save_dir, func, func_kwargs, resubmit=True, func_args=()
             executor.update_parameters(mem_gb=args.sl_mem)
         if args.sl_nodelist is not None:
             additional_parameters['nodelist'] = args.sl_nodelist
+        if args.sl_gpu_mem_gb is not None:
+            additional_parameters['mem_per_gpu'] = args.sl_gpu_mem_gb
+        print(additional_parameters)
 
         executor.update_parameters(slurm_additional_parameters=additional_parameters)
         with executor.batch():
@@ -106,7 +116,7 @@ def slurm_wrapper(args, save_dir, func, func_kwargs, resubmit=True, func_args=()
                     job = executor.submit(Worker(), **{'func': func, 'args': func_args, 'kwargs': func_kwargs})
                 else:
                     job = executor.submit(func, *func_args, **func_kwargs)
-
+                # print('run job in ', save_dir, job.job_id)
     else:
         print(func_args, )
         func(*func_args, **func_kwargs)
@@ -122,6 +132,7 @@ def add_slurm_args(arg_parser):
     )
     arg_parser.add_argument("--sl_time",default=48, type=int, help='timeout in hours')  # in ours hrs
     arg_parser.add_argument("--sl_name", default='dev', type=str)  
+    arg_parser.add_argument("--sl_gpu_mem_gb", default=None, type=str)  
     arg_parser.add_argument("--sl_dir", default='/home/yufeiy2/slurm_cache_shot', type=str)  
     arg_parser.add_argument("--sl_work",default=10, type=int)
     arg_parser.add_argument("--sl_node",default=1, type=int)  # 16 hrs

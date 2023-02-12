@@ -201,6 +201,9 @@ class ManopthWrapper(nn.Module):
             textures = TexturesVertex(textures)
         elif torch.is_tensor(texture):
             textures = TexturesUV(texture, self.faces_uv.repeat(N, 1, 1), self.verts_uv.repeat(N, 1, 1))
+        elif texture == 'uv':
+            ones = torch.ones([N, 64, 64, 3], device=device)
+            textures = TexturesUV(ones, self.faces_uv.repeat(N, 1, 1), self.verts_uv.repeat(N, 1, 1))
 
         else:
             raise NotImplementedError
