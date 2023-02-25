@@ -587,13 +587,13 @@ def save_dxdy(dxdy, fname, scale=False):
 
 
 def sample_contour(
-        mask,
+        mask, sample_size=1000,
     ):
     # indices_y, indices_x = np.where(mask)
     # npoints = len(indices_y)
     contour = measure.find_contours(mask, 0)
     contour = np.concatenate(contour)
-    sample_size = 1000
+    
 
     def offset_and_clip_contour(contour, offset, img_size):
         contour = contour + offset
@@ -636,7 +636,7 @@ def sample_contour(
     # contour_mask[new_contours[:,0], new_contours[:,1]] = 1
     npoints = len(new_contours)
     sample_indices = np.random.choice(
-        range(npoints), size=sample_size, replace=False
+        range(npoints), size=sample_size, replace=npoints < sample_size
     )
 
     # swtich x any y.

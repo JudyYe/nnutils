@@ -23,29 +23,30 @@ from torch._six import string_classes
 int_classes = int
 np_str_obj_array_pattern = re.compile(r'[SaUO]')
 
+import trimesh
+from trimesh.base import Trimesh
+from trimesh.voxel.base import VoxelGrid
+
+import torch
+import torch.nn.functional as F
 
 import pytorch3d.io as io3d
 import pytorch3d.ops as ops_3d
 import pytorch3d.structures
 import pytorch3d.structures.utils as struct_utils
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import trimesh
 from pytorch3d.renderer import (AlphaCompositor, BlendParams,
                                 DirectionalLights, MeshRasterizer,
                                 PerspectiveCameras,
                                 PointsRasterizationSettings, PointsRasterizer,
                                 PointsRenderer, RasterizationSettings,
                                 TexturesUV, TexturesVertex)
+from pytorch3d.renderer.cameras import look_at_rotation
 from pytorch3d.structures import Pointclouds
 from pytorch3d.structures.meshes import join_meshes_as_batch
 from pytorch3d.transforms import (Rotate, Scale, Transform3d, Translate,
                                   euler_angles_to_matrix)
-from trimesh.base import Trimesh
-from trimesh.voxel.base import VoxelGrid
 
-from . import geom_utils, image_utils
+from . import geom_utils
 from .layers import grid_sample
 from .my_pytorch3d import Meshes, chamfer_distance
 
@@ -444,6 +445,50 @@ def fragment_to_shader(fragments, meshes, cameras, rgb_mode=True, depth_mode=Fal
 
 
 
+def render_pc(point_clouds: Pointclouds, cameras, out_size=224, **kwargs):
+    # Define the settings for rasterization and shading. Here we set the output image to be of size
+    # 512x512. As we are rendering images for visualization purposes only we will set faces_per_pixel=1
+    # and blur_radius=0.0. Refer to raster_points.py for explanations of these parameters. 
+    raster_settings = PointsRasterizationSettings(
+        image_size=out_size, 
+        radius = 2/out_size,
+        points_per_pixel = kwargs.get('points_per_pixel', 10),
+        
+    )
+    device = cameras.device
+    out = {}
+
+    rasterizer = PointsRasterizer(cameras=cameras, raster_settings=raster_settings)
+    fragments = rasterizer(point_clouds, **kwargs)
+    out['frag'] = fragments
+
+    # Construct weights based on the distance of a point to the true point.
+    # However, this could be done differently: e.g. predicted as opposed
+    # to a function of the weights.
+    r = rasterizer.raster_settings.radius
+    compositor = AlphaCompositor()
+    dists2 = fragments.dists.permute(0, 3, 1, 2)
+    weights = 1 - kwargs.get('sigma', 1) * dists2 / (r * r)
+    images = compositor(
+        fragments.idx.long().permute(0, 3, 1, 2),
+        weights,
+        point_clouds.features_packed().permute(1, 0),
+        background_color=(1, 1, 1),
+        **kwargs,
+    )
+
+    # permute so image comes at the end
+    images = images.permute(0, 2, 3, 1)
+    rgb = flip_transpose_canvas(images, False)
+
+    fg_mask = fragments.idx.long()[...,  0:1] >= 0
+    mask = flip_transpose_canvas(fg_mask, False)
+
+    out['image'] = rgb
+    out['mask'] = mask
+    return out
+
+
 def render_mesh(meshes: Meshes, cameras, 
                 rgb_mode=True, 
                 depth_mode=False, 
@@ -551,7 +596,7 @@ def normal_shading(meshes, fragments):
 
 
 def render_soft(meshes: Meshes, cameras: PerspectiveCameras, 
-    rgb_mode=True, depth_mode=False, xy_mode=False, normal_mode=False, **kwargs):
+    rgb_mode=True, depth_mode=False, xy_mode=False, normal_mode=False, uv_mode=False, **kwargs):
     """
     :param meshes:
     :param cameras:
@@ -609,7 +654,10 @@ def render_soft(meshes: Meshes, cameras: PerspectiveCameras,
         out['normal'] =  normal_shading(meshes, fragments) 
         out['normal'] = flip_transpose_canvas(out['normal'], False)
         out['normal'][:, 1:3] *= -1 # xyz points to left, up, outward
-
+    if uv_mode: 
+        uv = hard_uv_shading(meshes, fragments,) 
+        uv = flip_transpose_canvas(uv, False)
+        out['uv'] = uv  # (N, 2, H, W)        
     return out
 
 
@@ -623,7 +671,7 @@ def flip_transpose_canvas(image, rgba=True):
         return image
 
 
-def render_pc(pointcloud, cameras, **kwargs):
+def render_pc_legacy(pointcloud, cameras, **kwargs):
     """
     :param meshes:
     :param out_size: H=W
@@ -688,7 +736,11 @@ def center_norm_geom(geom,  dist=20, max_norm=1):
     bbnx_min = torch.min(verts, dim=1, keepdim=False)[0]  # (N, 3)
 
     width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N, 1, 1)
-    scale = Scale(2 * max_norm / width, device=device)
+    if max_norm is None:
+        scale = Scale(torch.ones_like(width), device=device)
+    else:
+        scale = Scale(2 * max_norm / width, device=device)
+    
     geom_norm = apply_transform(geom, scale)
     
     center = (bbnx_max + bbnx_min) /2 * 2 / width
@@ -982,6 +1034,36 @@ def depth_to_pc(depth, image: torch.Tensor=None, cameras=None, mask=None, scale=
 
 
 # ######## Camera utils ########
+def sample_lookat_like(wTc=None, cTw=None, t_std=0, s_std=0): 
+    """sample a camera wTc on a sphere with the same distence and scale factor, 
+        ignore R. ? shall we just assume look at (0, 0, 0)?
+    :param wTc: _description_
+    :param t_std: translation range, if sets, will perturb camera dist uniformly between 1 \pm t_std
+    :return: _description_
+    """
+    rtn_wTc = True
+    if wTc is None:
+        rtn_wTc = False
+        wTc = geom_utils.inverse_rt(mat=cTw, return_mat=True)
+    # world j hans included scene box, so has scale factor.
+    _, scale = geom_utils.mat_to_scale_rot(wTc[..., :3, :3])
+
+    direct_unit_vec = torch.randn_like(scale)  # ..., 3
+    direct_unit_vec = direct_unit_vec / direct_unit_vec.norm(2, -1, keepdim=True).clamp(1e-7)
+    rot_T = look_at_rotation(direct_unit_vec, device=direct_unit_vec.device).transpose(-1, -2)
+
+    norm = get_camera_dist(wTc=wTc)  # we want to get camera dist, and put it to -z? 
+    if t_std > 0:
+        noise = torch.rand_like(norm) * t_std * 2 - t_std
+        norm += noise
+    zeros = torch.zeros_like(norm)
+    trans = torch.stack([zeros, zeros, norm], -1).unsqueeze(-1)
+    wTc = geom_utils.rt_to_homo(rot_T, -rot_T@trans, scale)  
+    if rtn_wTc:
+        return wTc     
+    return geom_utils.inverse_rt(mat=wTc, return_mat=True)
+
+
 def sample_camera_extr_like(wTc=None, cTw=None, t_std=0, s_std=0):
     """sample a camera wTc on a sphere with the same distence and scale factor, 
         wo requiring camera pointing up
@@ -1827,6 +1909,22 @@ def to_trimesh(meshes: Meshes) -> Trimesh:
     vert = meshes.verts_list()[0].cpu().detach().numpy()
     face = meshes.faces_list()[0].cpu().detach().numpy()
     return Trimesh(vert, face)
+
+def from_trimeshes(mesh_list: List[Trimesh]) -> Meshes:
+    v_list, f_list = [], []
+    for m in mesh_list:
+        v_list.append(torch.FloatTensor(m.vertices))
+        f_list.append(torch.LongTensor(m.faces))
+    meshes = Meshes(v_list, f_list)
+    return meshes
+
+def to_trimeshes(meshes: Meshes) -> List[Trimesh]:
+    mesh_list = []
+    for i in range(len(meshes)):
+        vert = meshes.verts_list()[i].cpu().detach().numpy()
+        face = meshes.faces_list()[i].cpu().detach().numpy()
+        mesh_list.append(Trimesh(vert, face))
+    return mesh_list
 
 
 def make_grid(N, halfsize=1, device='cpu', order='zyx'):

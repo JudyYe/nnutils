@@ -47,7 +47,7 @@ def deep_to(data, device='cuda'):
 def to_cuda(data, device='cuda'):
     new_data = {}
     for key in data:
-        if hasattr(data[key], 'cuda'):
+        if hasattr(data[key], 'to'):
             new_data[key] = data[key].to(device)
         else:
             new_data[key] = data[key]

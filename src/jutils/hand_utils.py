@@ -108,10 +108,11 @@ def get_mean_pose(model='mano', tensor=True, device='cpu'):
 
 
 class ManopthWrapper(nn.Module):
-    def __init__(self, mano_path='/home/yufeiy2/scratch/pretrain/smpl/mano_v1_2/models', **kwargs):
+    def __init__(self, mano_path='/home/yufeiy2/scratch/pretrain/smpl/mano_v1_2/models', side='right', **kwargs):
         super().__init__()
         self.mano_layer_right = ManoLayer(
-            mano_root=mano_path, side='right', use_pca=kwargs.get('use_pca', False), ncomps=kwargs.get('ncomps', 45),
+            mano_root=mano_path, side=side, 
+            use_pca=kwargs.get('use_pca', False), ncomps=kwargs.get('ncomps', 45),
             flat_hand_mean=kwargs.get('flat_hand_mean', True))
         self.metric = kwargs.get('metric', 1)
         
@@ -130,7 +131,7 @@ class ManopthWrapper(nn.Module):
         self.register_buffer('contact_index' , torch.LongTensor(contact_list))
 
         # load uv map
-        fname = osp.join(mano_path, kwargs.get('uv', 'MANO_UV_right'))
+        fname = osp.join(mano_path, kwargs.get('uv', f'MANO_UV_{side}'))
         if kwargs.get('closed', True):
             if osp.exists(fname + '_closed.obj'):
                 fname = fname + '_closed'

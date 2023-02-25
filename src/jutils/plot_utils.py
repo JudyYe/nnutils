@@ -58,7 +58,7 @@ def create_cube(device, N=1, align='center'):
     return cube_verts.unsqueeze(0).expand(N, 8, 3), cube_faces.unsqueeze(0).expand(N, 12, 3)
 
 
-def create_coord(device, N=1):
+def create_coord(device, N=1, size=1):
     """Meshes of xyz-axis, each is 1unit, in color RGB
 
     :param device: _description_
@@ -67,6 +67,7 @@ def create_coord(device, N=1):
     """
     if isinstance(device, int):
         device = torch.device(device)
+    scale_size = Scale(torch.tensor([size, size, size], dtype=torch.float32, device=device))
     scale = Scale(torch.tensor(
         [
             [1, 0.05, 0.05],
@@ -90,6 +91,7 @@ def create_coord(device, N=1):
     ), 'XYZ'))
     # X -> scale -> R -> t, align
     transform = scale.compose(rot, translate)
+    transform = transform.compose(scale_size)
 
     each_verts, each_faces, num_cube = 8, 12, 3
     verts, faces = create_cube(device, num_cube)
