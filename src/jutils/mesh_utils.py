@@ -1537,6 +1537,51 @@ def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, boun
     return meshes
 
 
+def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx'):
+    """transform to bSdf, for outside of the boundary, 
+    set to sdf + eucidean distance to boundary
+    assume voxels are in zyx order
+    :param aSdf: (B, 1, H, H, H)
+    :param bTa: (B, 4, 4)
+    :return: (B, 1, H, H, H)
+    """
+    B = len(aSdf)
+    device = aSdf.device
+    if order == 'zyx':
+        aSdf = aSdf.transpose(-1, -3)
+
+    d, h, w = torch.meshgrid(
+        torch.linspace(-lim, lim, N),
+        torch.linspace(-lim, lim, N),
+        torch.linspace(-lim, lim, N), 
+    )
+    bXyz = torch.stack([w, h, d], dim=-1)  # (N, N, N, 3)
+    # bXyz = torch.stack([d, h, w], dim=-1)  # (N, N, N, 3)
+    bXyz = bXyz.to(device)
+    bXyz = bXyz.reshape(-1, 3)  # (N**3, 3)
+    bXyz = bXyz[None].repeat(B, 1, 1)  # (B, N**3, 3)
+
+    aTb = geom_utils.inverse_rt(mat=bTa, return_mat=True)
+    aXyz = mesh_utils.apply_transform(bXyz, aTb)  # (B, N**3, 3)
+    # print(aXyz)
+    aXyz = aXyz.reshape(B, N, N, N, 3)  # (B, N, N, N, 3)
+    bSdf_in_a = F.grid_sample(aSdf, aXyz, mode='bilinear', padding_mode='border')
+
+    # take care of scale 
+    _, _, bTa_scale = geom_utils.homo_to_rt(bTa)
+    bSdf_in_b = bSdf_in_a * bTa_scale[..., 0].reshape(B, 1, 1, 1, 1)
+    
+    # (B, N**3, 3). extra_dist is the l2-distance to rectantle [-1, 1]
+    extra_dist_in_a = (torch.abs(aXyz) - 1).clamp_(min=0)
+    extra_dist_in_a = (extra_dist_in_a**2).sum(dim=-1, keepdim=True).sqrt()
+    extra_dist = extra_dist_in_a * bTa_scale[..., 0].reshape(B, 1, 1)
+    bSdf = bSdf_in_b + extra_dist.reshape(B, 1, N, N, N)
+
+    if order == 'zyx':
+        bSdf = bSdf.transpose(-1, -3)
+    return bSdf
+
+
 def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=False, half_size=1, **kwargs):
     """convert a batched sdf to meshes
     Args:
@@ -1598,6 +1643,7 @@ def grid_xyz_samples(N=64, half_size=1):
 
     samples.requires_grad = False
     return samples, voxel_origin, voxel_size
+
 
 def create_mesh(
         decoder, filename=None, N=64, max_batch=32 ** 3, offset=None, scale=None,
