@@ -517,6 +517,17 @@ def save_images(images, fname, text_list=[None], merge=1, col=8, scale=False, bg
     :param keypoint: (N, K, 2) in scale of [-1, 1]
     :return:
     """
+    if images.shape[1] == 4:
+        if scale:
+            images = images / 2 + 0.5  # [0,1]  # (N, 4, H, W)
+        image = vutils.make_grid(images, col)
+        image = image.cpu().detach().numpy().transpose([1, 2, 0])
+        image = np.clip(255 * image, 0, 255).astype(np.uint8)
+        os.makedirs(osp.dirname(fname), exist_ok=True)
+        imageio.imwrite(fname + ext, image)
+        return image
+        
+        image.numpy().transpose([1, 2, 0])
     if bg is not None:
         images = blend_images(images, bg, mask, r)
     if keypoint is not None:
@@ -757,7 +768,7 @@ def write_gif(image_list, gif_name):
     print('save to ', gif_name + '.gif')
 
 
-def write_mp4(video, save_file):
+def write_mp4(video, save_file, pref_ffmpeg='~/.local/bin/'):
     tmp_dir = save_file + '.tmp'
     os.makedirs(tmp_dir, exist_ok=True)
     for t, image in enumerate(video):
@@ -766,7 +777,7 @@ def write_mp4(video, save_file):
     if osp.exists(save_file + '.mp4'):
         os.system('rm %s.mp4' % (save_file))
     src_list_dir = osp.join(tmp_dir, '%02d.jpg')
-    cmd = 'ffmpeg -framerate 10 -i %s -c:v libx264 -pix_fmt yuv420p %s.mp4' % (src_list_dir, save_file)
+    cmd = pref_ffmpeg + 'ffmpeg -framerate 10 -i %s -c:v libx264 -pix_fmt yuv420p %s.mp4' % (src_list_dir, save_file)
     cmd += ' -hide_banner -loglevel error'
     print(cmd)
     os.system(cmd)

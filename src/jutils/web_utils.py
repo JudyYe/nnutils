@@ -2,15 +2,12 @@
 # Written by Yufei Ye (https://github.com/JudyYe)
 # --------------------------------------------------------
 """Usage: make_web.run(root, 2D_cell_list, wdith) """
-from __future__ import print_function
-from ast import arg
 from glob import glob
 
 import os
 import shutil
-from turtle import hideturtle
 
-from flask_table import Table, Col, create_table
+from flask_table import Col, create_table
 from flask import Markup
 import argparse
 from . import mesh_utils
@@ -25,10 +22,15 @@ def parse_args():
     return args
 
 
-def run(html_root, cell_list, width=200, hide_text=False, height=None):
+def run(html_root, cell_list, width=200, hide_text=False, height=None, inplace=False):
     """
     cell_list: 2D array, each element could be: filepath of vid/image, str
     """
+    if not html_root.endswith('.html'):
+        html_file = os.path.join(html_root, 'index.html')
+    else:
+        html_file = html_root
+        html_root = os.path.dirname(html_root)
     os.makedirs(html_root, exist_ok=True)
 
     ncol = len(cell_list[0])
@@ -41,18 +43,19 @@ def run(html_root, cell_list, width=200, hide_text=False, height=None):
     for r, row in enumerate(cell_list):
         line = {}
         for c in range(ncol):
-            line['%d' % c] = html_add_col_text(row[c], html_root, width, 'r%02dc%02d' % (r, c), hide_text, height=height)
+            pref = 'r%02dc%02d' % (r, c)
+            line['%d' % c] = html_add_col_text(row[c], html_root, width, pref, hide_text, height=height, inplace=inplace)
         items.append(line)
     table = TableCls(items)
     html_str = table.__html__()
-    with open(os.path.join(html_root, 'index.html'), 'w') as fp:
+    with open(os.path.join(html_file), 'w') as fp:
         # add header
         fp.write('<script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>\n')
         fp.write(html_str)
-        print('write to %s.html' % os.path.join(html_root, 'index'))
+        print('write to %s' % html_file)
 
 
-def html_add_col_text(src_file, vis_dir, width, pref, hide_text=False, height=None):
+def html_add_col_text(src_file, vis_dir, width, pref, hide_text=False, height=None, inplace=False):
     """
     :param col_name: cols to add to the line
     :param line:
@@ -65,32 +68,31 @@ def html_add_col_text(src_file, vis_dir, width, pref, hide_text=False, height=No
     else:
         size = 'height="%d"' % height
     img_temp = '<a href="{0}"><img src="{0}" %s> </a> <br/> {0} <br/>' % size
-    vid_temp = '<video controls %s><source src="{0}" type="video/mp4"></video> <br/> {0} <br/>' % size
+    vid_temp = '<video playsinline controls autoplay muted loop  %s ><source src="{0}" type="video/mp4"></video> <br/> {0} <br/>' % size
     mesh_temp = '<model-viewer src="{0}" style="width:%d" shadow-intensity="1" camera-controls="" auto-rotate="" ar="" ar-status="not-presenting"></model-viewer>' % width
     if hide_text:
         img_temp = img_temp.split('<br/>')[0]
         vid_temp = vid_temp.split('<br/>')[0]
     str_temp = '{0}'
     col_text = ''
-    # print(src_file)
     if isinstance(src_file, str) and os.path.exists(src_file):
         ext = src_file.split('.')[-1]
         if ext in ['mp4']:
             temp = vid_temp
             dst_file = os.path.join(vis_dir, '%s_%s' % (pref, os.path.basename(src_file)))
-            shutil.copyfile(src_file, dst_file)
+            if not inplace: shutil.copyfile(src_file, dst_file)
         elif ext in ['png', 'gif', 'jpg', 'jpeg']:
             temp = img_temp
             dst_file = os.path.join(vis_dir, '%s_%s' % (pref, os.path.basename(src_file)))
-            shutil.copyfile(src_file, dst_file)
+            if not inplace: shutil.copyfile(src_file, dst_file)
         elif ext in ['obj', 'ply', 'glb']:
             temp = mesh_temp
             dst_file = os.path.join(vis_dir, '%s_%s' % (pref, os.path.basename(src_file)[:-3] + 'glb'))
             mesh_utils.meshfile_to_glb(src_file, dst_file)
         else:
             dst_file = os.path.join(vis_dir, '%s_%s' % (pref, os.path.basename(src_file)))
-            shutil.copyfile(src_file, dst_file)
-
+            if not inplace: shutil.copyfile(src_file, dst_file)
+        if inplace: dst_file = src_file
         col_text += temp.format(os.path.basename(dst_file))
     else:
         col_text += str_temp.format(src_file)

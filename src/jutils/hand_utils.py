@@ -20,7 +20,7 @@ from . import geom_utils, mesh_utils
 
 
 
-def get_jsTn(hand_wrapper, hA):
+def get_jsTn(hand_wrapper, hA, **kwargs):
     hTjs = hand_wrapper.pose_to_transform(hA, False)  # (N, J, 4, 4)
     N, num_j, _, _ = hTjs.size()
     jsTh = geom_utils.inverse_rt(mat=hTjs, return_mat=True)
@@ -30,14 +30,14 @@ def get_jsTn(hand_wrapper, hA):
     return jsTx
 
 
-def transform_nPoints_to_js(hand_wrapper, hA, nPoints):
+def transform_nPoints_to_js(hand_wrapper, hA, nPoints, **kwargs):
     """
     embed points to each joints
     nPoints: (N, P, 3? )
     jsPoints: (N, P, J, 3)
     """
     N, P, _ = nPoints.size()
-    jsTn = get_jsTn(hand_wrapper, hA)
+    jsTn = get_jsTn(hand_wrapper, hA, **kwargs)
     
     num_j = jsTn.size(1)
     nPoints_exp = nPoints.view(N, 1, P, 3).expand(N, num_j, P, 3).reshape(N * num_j, P, 3)
@@ -58,7 +58,7 @@ def get_nTh(r=0.2, center=None, hA=None, hand_wrapper=None, inverse=False):
     """
     # add a dummy batch dim
     if center is None:
-        hJoints = hand_wrapper(None, hA, mode='inner')[1]
+        hJoints = hand_wrapper(None, hA)[1]
         start = 5
         center = hJoints[:, start]  #
     device = center.device

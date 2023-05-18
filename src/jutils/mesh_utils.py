@@ -508,7 +508,7 @@ def render_mesh(meshes: Meshes, cameras,
                                  RasterizationSettings(
                                      image_size=image_size, 
                                      faces_per_pixel=2,
-                                     bin_size=0,
+                                     bin_size=kwargs.get('bin_size', 0),
                                      cull_backfaces=False))
     device = cameras.device
 
@@ -749,8 +749,8 @@ def center_norm_geom(geom,  dist=20, max_norm=1):
     cGeom = apply_transform(geom_norm, trans)
     
     transfm = scale.compose(trans)
-
     return cGeom, transfm
+
 
 def render_geom_rot(geom: Union[Meshes, Pointclouds],
                     view_mod='az', scale_geom=False, 
@@ -1441,7 +1441,10 @@ def join_scene(mesh_list: List[Meshes]) -> Meshes:
 
 def expand_meshes(meshes: Meshes, N):
     assert len(meshes) == 1
-    
+    verts = meshes.verts_packed().unsqueeze(0).expand(N, -1, -1)
+    faces = meshes.faces_packed().unsqueeze(0).expand(N, -1, -1)
+    device = meshes.device
+    return Meshes(verts, faces).to(device)
 
 def join_scene_w_labels(mesh_list: List[Meshes], num_classes=3) -> Meshes:
     assert len(mesh_list) <= num_classes
@@ -1493,7 +1496,7 @@ def cubify(voxels, th=0.5):
     
 
 ### SDF Utils #####
-def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, bound=False, **kwargs):
+def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, bound=False, vol_size=1, **kwargs):
     """convert a batched sdf to meshes
     Args:
         sdf (Callable): signature: sdf(points (N, P, 3), **kwargs) where kwargs should be filled 
@@ -1503,7 +1506,7 @@ def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, boun
         Mehses
     """
     N = kwargs.get('N', 64)
-    samples, voxel_origin, voxel_size = grid_xyz_samples(N)  # (P, 3) on cpu
+    samples, voxel_origin, voxel_size = grid_xyz_samples(N, vol_size)  # (P, 3) on cpu
     samples = samples.unsqueeze(0).repeat(batch_size, 1, 1)  # (B, P, 3)
     num_samples = samples.size(1)
 
@@ -1534,7 +1537,7 @@ def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, boun
     return meshes
 
 
-def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=False, **kwargs):
+def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=False, half_size=1, **kwargs):
     """convert a batched sdf to meshes
     Args:
         grids: (N, H, H, H)
@@ -1544,7 +1547,7 @@ def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=
         Mehses
     """
     N = sdf_values.shape[-1]
-    samples, voxel_origin, voxel_size = grid_xyz_samples(N)  # (P, 3) on cpu
+    samples, voxel_origin, voxel_size = grid_xyz_samples(N, half_size)  # (P, 3) on cpu
 
     verts_list, faces_list, tex_list = [], [], []
     for n in range(batch_size):
@@ -1574,16 +1577,16 @@ def sdf_to_meshes(sdf: Callable, cat_func: Callable=lambda x:x, z=None, **kwargs
     meshes = Meshes(verts_list, faces_list, TexturesVertex(tex_list)).cuda()
     return meshes
 
-def grid_xyz_samples(N=64):
-    voxel_origin = [-1, -1, -1]
-    voxel_size = 2.0 / (N - 1)
+def grid_xyz_samples(N=64, half_size=1):
+    voxel_origin = [-half_size, -half_size, -half_size]
+    voxel_size = 2.0 * half_size / (N - 1)
 
     overall_index = torch.arange(0, N ** 3, 1, out=torch.LongTensor())
     samples = torch.zeros(N ** 3, 4)
 
     # transform first 3 columns
     # to be the x, y, z index
-    samples[:, 2] = overall_index % N
+    samples[:, 2] = overall_index % N  # W
     samples[:, 1] = (overall_index.long() // N) % N
     samples[:, 0] = ((overall_index.long() // N) // N) % N
 
@@ -1591,7 +1594,7 @@ def grid_xyz_samples(N=64):
     # to be the x, y, z coordinate. convert to range [-1, 1]
     samples[:, 0] = (samples[:, 0] * voxel_size) + voxel_origin[2]
     samples[:, 1] = (samples[:, 1] * voxel_size) + voxel_origin[1]
-    samples[:, 2] = (samples[:, 2] * voxel_size) + voxel_origin[0]
+    samples[:, 2] = (samples[:, 2] * voxel_size) + voxel_origin[0]  # z? W/x?? 
 
     samples.requires_grad = False
     return samples, voxel_origin, voxel_size
@@ -1923,7 +1926,7 @@ def to_trimeshes(meshes: Meshes) -> List[Trimesh]:
     for i in range(len(meshes)):
         vert = meshes.verts_list()[i].cpu().detach().numpy()
         face = meshes.faces_list()[i].cpu().detach().numpy()
-        mesh_list.append(Trimesh(vert, face))
+        mesh_list.append(Trimesh(vert, face, process=False))
     return mesh_list
 
 
@@ -1999,3 +2002,142 @@ def sample_unit_cube(hObj, num_points, r=1):
         return handle
 
 
+# for vhoi
+def render_hoi_obj_overlay(jHand, jObj, jTc=None, cTj=None, H=512, W=512, K_ndc=None, **kwargs):
+    device = 'cuda:0'
+    jObj.textures = pad_texture(jObj, 'white')
+    if jHand is not None:
+        jHand.textures = pad_texture(jHand, 'blue')
+        jMeshes = join_scene([jHand, jObj])
+    else:
+        jMeshes = jObj
+    if cTj is None:
+        cTj = geom_utils.inverse_rt(mat=jTc, return_mat=True)
+    cMeshes = apply_transform(jMeshes, cTj)
+    cObj = apply_transform(jObj, cTj)
+
+    cam_f, cam_p = get_fxfy_pxpy(K_ndc)
+    cameras = PerspectiveCameras(cam_f, cam_p, device=device)
+    iMeshes = render_mesh(cMeshes, cameras, out_size=H, **kwargs)
+    iHoi = torch.cat([iMeshes['image'], iMeshes['mask']], 1)
+
+    iObj = render_mesh(cObj, cameras, out_size=H, **kwargs)
+    iObj = torch.cat([iObj['image'], iObj['mask']], 1)
+    return iHoi, iObj
+
+
+def render_hoi_obj(jHand, jObj, az, jTc=None, cTj=None, H=256, W=256, scale_geom=True, scale=10, **kwargs):
+    if jObj is not None:
+        jObj.textures = pad_texture(jObj, 'white')
+    if jHand is not None:
+        if jObj is None:
+            jMeshes = jHand
+            jObj = jMeshes
+        else:
+            jHand.textures = pad_texture(jHand, 'blue')
+            jMeshes = join_scene([jHand, jObj])
+    else:
+        jMeshes = jObj
+    device = jMeshes.device
+
+    if scale_geom:
+        if cTj is None:
+            cTj = geom_utils.inverse_rt(mat=jTc, return_mat=True)
+        cMeshes = apply_transform(jMeshes, cTj)
+        oMeshes, oTc = center_norm_geom(cMeshes, max_norm=1)
+
+        cObj = apply_transform(jObj, cTj)
+        oObj = apply_transform(cObj, oTc)
+    else:
+        scale_trans = Scale(scale).to(device)
+        oMeshes = apply_transform(jMeshes, scale_trans)
+        oObj = apply_transform(jObj, scale_trans)
+    
+    iMeshes = render_geom_azel(oMeshes, [az, 0], scale_geom=False, out_size=H, **kwargs)
+    iHoi = torch.cat([iMeshes['image'], iMeshes['mask']], 1)
+    iObj = render_geom_azel(oObj, [az, 0], scale_geom=False, out_size=H, **kwargs)
+    iObj = torch.cat([iObj['image'], iObj['mask']], 1)
+
+    return iHoi, iObj
+
+
+
+def render_geom_azel(geom, azel, degree=True, scale_geom=True, f=10, **kwargs):
+    N = len(geom)
+    device = geom.device
+    render = get_render_func(geom)
+
+    cameras = PerspectiveCameras(f, device=device)
+
+    if scale_geom:
+        oGeom, _ = center_norm_geom(geom, max_norm=1)
+    else:
+        oGeom = geom
+
+    # 2. get rotation list
+    if not torch.is_tensor(azel):
+        azel = torch.FloatTensor(azel)
+    azel = azel.reshape(-1, 2).to(device)
+    azel = azel.expand(N, 2)
+    if degree:
+        azel = azel / 180 * np.pi
+
+    xyz = torch.zeros([N, 3], device=device)
+    xyz[..., 2] = kwargs.get('dist', 1.1*f)
+    trans = Translate(xyz, device=device)
+
+    rot = geom_utils.azel_to_rot(azel, homo=True)
+    oGeom_prim = apply_transform(oGeom, rot)
+    # cGeom_prim = apply_transform()
+    cGeom_prim = apply_transform(oGeom_prim, trans)
+    iGeom = render(cGeom_prim, cameras, **kwargs)
+    return iGeom
+
+def get_wTcp_from_wObj(az, wObj, wTc=None, cTw=None, return_wTc=True):
+    if cTw is None:
+        cTw = geom_utils.inverse_rt(mat=wTc, return_mat=True)
+    N = len(cTw)
+    device = cTw.device
+
+    if isinstance(az, float):
+        az = torch.zeros([N, ], device=device) + az
+    az = az.reshape(-1)
+
+    cObj = apply_transform(wObj, cTw)
+    cTw_trans = cObj.verts_padded().mean(1)  # (N, 3)
+    # _, cTw_trans, _ = geom_utils.homo_to_rt(cTw)
+    w_transTc = -cTw_trans
+    eye = torch.eye(3)[None].repeat(N, 1, 1).to(device)
+    cTw_trans = geom_utils.rt_to_homo(eye, t=cTw_trans)
+    w_transTc = geom_utils.rt_to_homo(eye, t=w_transTc)
+    w_rotTw_trans = geom_utils.azel_to_rot(torch.stack([az, torch.zeros_like(az)], -1), homo=True)
+    cpTc = cTw_trans @ w_rotTw_trans @ w_transTc
+    cpTw = cpTc @ cTw 
+    if return_wTc:
+        wTcp = geom_utils.inverse_rt(mat=cpTw, return_mat=True)
+        return wTcp
+    return cpTw
+
+
+def get_wTcp_in_camera_view(az, wTc=None, cTw=None, return_wTc=True):
+    if cTw is None:
+        cTw = geom_utils.inverse_rt(mat=wTc, return_mat=True)
+    N = len(cTw)
+    device = cTw.device
+
+    if isinstance(az, float):
+        az = torch.zeros([N, ], device=device) + az
+    az = az.reshape(-1)
+
+    _, cTw_trans, _ = geom_utils.homo_to_rt(cTw)
+    w_transTc = -cTw_trans
+    eye = torch.eye(3)[None].repeat(N, 1, 1).to(device)
+    cTw_trans = geom_utils.rt_to_homo(eye, t=cTw_trans)
+    w_transTc = geom_utils.rt_to_homo(eye, t=w_transTc)
+    w_rotTw_trans = geom_utils.azel_to_rot(torch.stack([az, torch.zeros_like(az)], -1), homo=True)
+    cpTc = cTw_trans @ w_rotTw_trans @ w_transTc
+    cpTw = cpTc @ cTw 
+    if return_wTc:
+        wTcp = geom_utils.inverse_rt(mat=cpTw, return_mat=True)
+        return wTcp
+    return cpTw

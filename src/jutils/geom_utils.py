@@ -56,8 +56,8 @@ def mat_to_scale_rot(mat):
     Args:
         mat ( ): (..., 3, 3)
     Returns:
-        scale: (..., 3)
         rot: (..., 3, 3)
+        scale: (..., 3)
     """
     sq = torch.matmul(mat, mat.transpose(-1, -2))
     scale_flat = torch.sqrt(torch.diagonal(sq, dim1=-1, dim2=-2))  # (..., 3)
@@ -107,7 +107,7 @@ def azel_to_rot(azel, homo=False, t=None):
     return rot
 
 
-def rt_to_homo(rot, t=None, s=None):
+def rt_to_homo(rot=None, t=None, s=None):
     """
     :param rot: (..., 3, 3)
     :param t: (..., 3 ,(1))
@@ -133,7 +133,7 @@ def rt_to_homo(rot, t=None, s=None):
 def homo_to_rt(mat):
     """
     :param (N, 4, 4) [R, t; 0, 1]
-    :return: rot: (N, 3, 3), t: (N, 3), s: (N, 1)
+    :return: rot: (N, 3, 3), t: (N, 3), s: (N, 3)
     """
     mat, _ = torch.split(mat, [3, mat.size(-2) - 3], dim=-2)
     rot_scale, trans = torch.split(mat, [3, 1], dim=-1)

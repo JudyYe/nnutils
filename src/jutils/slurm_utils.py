@@ -1,9 +1,37 @@
+import numpy as np
 import subprocess
 import os
 import time
 from typing import Any
 import submitit
 from argparse import ArgumentParser
+
+import hydra.utils as hydra_utils
+from pathlib import Path
+import logging as log
+
+def update_pythonpath_relative_hydra():
+    """Update PYTHONPATH to only have absolute paths."""
+    # NOTE: We do not change sys.path: we want to update paths for future instantiations
+    # of python using the current environment (namely, when submitit loads the job
+    # pickle).
+    try:
+        original_cwd = Path(hydra_utils.get_original_cwd()).resolve()
+    except (AttributeError, ValueError):
+        # Assume hydra is not initialized, we don't need to do anything.
+        # In hydra 0.11, this returns AttributeError; later it will return ValueError
+        # https://github.com/facebookresearch/hydra/issues/496
+        # I don't know how else to reliably check whether Hydra is initialized.
+        return
+    paths = []
+    for orig_path in os.environ["PYTHONPATH"].split(":"):
+        path = Path(orig_path)
+        if not path.is_absolute():
+            path = original_cwd / path
+        paths.append(path.resolve())
+    os.environ["PYTHONPATH"] = ":".join([str(x) for x in paths])
+    log.info('PYTHONPATH: {}'.format(os.environ["PYTHONPATH"]))
+
 
 def wrap_cmd(cmd):
     print(cmd)
@@ -30,7 +58,10 @@ def slurm_wrapper_hydra(args, callable_fn, debug=False):
         )
         # asks SLURM to send USR1 signal 30 seconds before the time limit
         additional_parameters = {}
-        additional_parameters = {"signal": 'SIGUSR2@30'}
+        # additional_parameters = {"signal": 'SIGUSR2@30'}
+        additional_parameters["signal"] = 'USR1@120'
+        additional_parameters["signal"] = 'SIGUSR1@120'
+
         
         # additional_parameters = {"signal": 'SIGUSR1@90'}
         if args.environment.nodelist != "":
@@ -56,7 +87,10 @@ def slurm_wrapper_hydra(args, callable_fn, debug=False):
         if debug:
             print('submit job')
             time.sleep(10)
-            job._interrupt(timeout=True)        
+            int_type = 0 # np.random.randint(0, 2)
+            print(f'interrupt job {int_type}')
+            job._interrupt(timeout=False)        
+            # job._interrupt()
             print('interrupt')
         if not args.environment.slurm:
             job.result()
