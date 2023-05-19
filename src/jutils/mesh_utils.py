@@ -514,6 +514,7 @@ def render_mesh(meshes: Meshes, cameras,
 
     rasterizer = MeshRasterizer(cameras=cameras, raster_settings=raster_settings).to(device)
     out = {}
+    # import pdb; pdb.set_trace()
     fragments = rasterizer(meshes, **kwargs)
     out['frag'] = fragments
 
@@ -777,6 +778,7 @@ def render_geom_rot(geom: Union[Meshes, Pointclouds],
         width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N, 1, 1)
 
         scale = Scale(2/width, device=device)
+        # import pdb; pdb.set_trace()
         geom_norm = apply_transform(geom, scale)
 
         geom_norm, _ = center_obj(geom_norm)
@@ -821,7 +823,9 @@ def apply_transform(geom: Union[Meshes, Pointclouds, torch.Tensor], trans: Trans
             trans = geom_utils.se3_to_matrix(trans)
         trans = Transform3d(matrix=trans.transpose(1, 2), device=trans.device)
     verts = get_verts(geom)
+    dtype = verts.dtype
     verts = trans.transform_points(verts)
+    verts = verts.to(dtype)  # for amp
     if hasattr(geom, 'update_padded'):
         geom = geom.update_padded(verts)
     else:
@@ -1537,13 +1541,13 @@ def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, boun
     return meshes
 
 
-def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx'):
+def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=False):
     """transform to bSdf, for outside of the boundary, 
     set to sdf + eucidean distance to boundary
     assume voxels are in zyx order
     :param aSdf: (B, 1, H, H, H)
     :param bTa: (B, 4, 4)
-    :return: (B, 1, H, H, H)
+    :return: bSdf: (B, 1, H, H, H) bXyz: (B, H, H, H, 3)
     """
     B = len(aSdf)
     device = aSdf.device
@@ -1562,10 +1566,12 @@ def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx'):
     bXyz = bXyz[None].repeat(B, 1, 1)  # (B, N**3, 3)
 
     aTb = geom_utils.inverse_rt(mat=bTa, return_mat=True)
-    aXyz = mesh_utils.apply_transform(bXyz, aTb)  # (B, N**3, 3)
+    aXyz = apply_transform(bXyz, aTb)  # (B, N**3, 3)
     # print(aXyz)
     aXyz = aXyz.reshape(B, N, N, N, 3)  # (B, N, N, N, 3)
-    bSdf_in_a = F.grid_sample(aSdf, aXyz, mode='bilinear', padding_mode='border')
+    bSdf_in_a = F.grid_sample(aSdf, aXyz, 
+        mode='bilinear', padding_mode='border', 
+        align_corners=align_corners)
 
     # take care of scale 
     _, _, bTa_scale = geom_utils.homo_to_rt(bTa)
@@ -1577,9 +1583,11 @@ def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx'):
     extra_dist = extra_dist_in_a * bTa_scale[..., 0].reshape(B, 1, 1)
     bSdf = bSdf_in_b + extra_dist.reshape(B, 1, N, N, N)
 
+    bXyz = bXyz.reshape(B, N, N, N, 3)
     if order == 'zyx':
         bSdf = bSdf.transpose(-1, -3)
-    return bSdf
+        bXyz = bXyz.flip(-1)
+    return bSdf, bXyz
 
 
 def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=False, half_size=1, **kwargs):
@@ -1591,6 +1599,8 @@ def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=
     Returns:
         Mehses
     """
+    if sdf_values.ndim == 5:
+        sdf_values = sdf_values.squeeze(1)
     N = sdf_values.shape[-1]
     samples, voxel_origin, voxel_size = grid_xyz_samples(N, half_size)  # (P, 3) on cpu
 
@@ -1599,14 +1609,14 @@ def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=
         # marching cube
         verts, faces = convert_sdf_samples_to_ply(sdf_values[n].cpu(), voxel_origin, voxel_size, add_bound=bound)
         device = sdf_values.device
-        verts = verts.to(device)
+        verts = verts.to(sdf_values)
         faces = faces.to(device)
         verts_list.append(verts)
         faces_list.append(faces)
         tex_list.append(torch.ones_like(verts))
-    meshes = Meshes(verts_list, faces_list).cuda()
+    meshes = Meshes(verts_list, faces_list).to(device)
     if meshes.isempty():
-        meshes.textures = TexturesVertex(torch.ones([batch_size, 0, 3]).cuda())
+        meshes.textures = TexturesVertex(torch.ones([batch_size, 0, 3]).to(sdf_values))
     return meshes
 
 def sdf_to_meshes(sdf: Callable, cat_func: Callable=lambda x:x, z=None, **kwargs):
@@ -1779,7 +1789,8 @@ def convert_sdf_samples_to_ply(
     if offset is not None:
         # mesh_points = mesh_points - offset
         mesh_points = mesh_points + offset
-
+    
+    # dtype = pytorch_3d_sdf_tensor.dtype
     verts_tensor = torch.from_numpy(np.array(mesh_points)).float()
     faces_tensor = torch.from_numpy(np.array(faces)).long()
 
