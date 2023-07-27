@@ -39,16 +39,21 @@ from pytorch3d.renderer import (AlphaCompositor, BlendParams,
                                 PerspectiveCameras,
                                 PointsRasterizationSettings, PointsRasterizer,
                                 PointsRenderer, RasterizationSettings,
-                                TexturesUV, TexturesVertex)
+                                TexturesUV, TexturesVertex,
+                                VolumeRenderer,     
+                                NDCMultinomialRaysampler,
+                                EmissionAbsorptionRaymarcher,
+                                AbsorptionOnlyRaymarcher,
+)
 from pytorch3d.renderer.cameras import look_at_rotation
-from pytorch3d.structures import Pointclouds
+from pytorch3d.structures import Pointclouds, Volumes
 from pytorch3d.structures.meshes import join_meshes_as_batch
 from pytorch3d.transforms import (Rotate, Scale, Transform3d, Translate,
                                   euler_angles_to_matrix)
 
 from . import geom_utils
 from .layers import grid_sample
-from .my_pytorch3d import Meshes, chamfer_distance
+from .my_pytorch3d import Meshes, chamfer_distance, BatchedNDCMultinomialRaysampler
 
 
 # ### Mesh IO Utils ###
@@ -167,7 +172,7 @@ def dump_meshes(mesh_path, meshes: Meshes, ext='.obj'):
     N = len(meshes)
     if isinstance(mesh_path, str):
         mesh_prefix = mesh_path
-        mesh_path = [mesh_prefix + '_%d' % n for n in range(N)]
+        mesh_path = [mesh_prefix + '_%02d' % n for n in range(N)]
     elif isinstance(mesh_path, list):
         assert len(mesh_path) == len(meshes)
 
@@ -377,7 +382,7 @@ def render_mesh_flow(wMeshes, cam1: PerspectiveCameras, cam2: PerspectiveCameras
     # flipped image
     ys, xs = torch.meshgrid(
         torch.linspace(1, -1, H),
-        torch.linspace(1, -1, W)
+        torch.linspace(1, -1, W), indexing='ij'
     )  # (H, W)
     ys = ys.unsqueeze(0).expand(N, H, W).to(device)
     xs = xs.unsqueeze(0).expand(N, H, W).to(device)
@@ -753,6 +758,106 @@ def center_norm_geom(geom,  dist=20, max_norm=1):
     return cGeom, transfm
 
 
+def render_sdf_grid(sdf_grid, cameras: PerspectiveCameras, 
+                    features=None, out_size=256, half_size=1,
+                    sdf_to_density=None, beta=100, order='zyx', **kwargs):
+    H = out_size
+    cTw = cameras.get_world_to_view_transform().get_matrix().transpose(-1, -2)
+    if order=='zyx':
+        sdf_grid = sdf_grid.transpose(-1, -3)
+    tsl =cTw[..., :3, 3]
+    z_dist = tsl[..., 2].abs()
+    raysampler = BatchedNDCMultinomialRaysampler(
+        image_width=H,
+        image_height=H,
+        n_pts_per_ray=150,
+        min_depth=z_dist - half_size,
+        max_depth=z_dist + half_size,
+    )
+
+    # 2) Instantiate the raymarcher.
+    # Here, we use the standard EmissionAbsorptionRaymarcher 
+    # which marches along each ray in order to render
+    # each ray into a single 3D color vector 
+    # and an opacity scalar.
+    raymarcher = EmissionAbsorptionRaymarcher()
+    if features is None:
+        features = sdf_grid.repeat(1, 3, 1, 1, 1)
+        features[:, 0] = 183/255; features[:, 1] = 216/255; features[:, 2] = 254/255
+
+    # Finally, instantiate the volumetric render
+    # with the raysampler and raymarcher objects.
+    renderer = VolumeRenderer(
+        raysampler=raysampler, raymarcher=raymarcher,
+    )
+    if sdf_to_density is None:
+        sdf_to_density = lambda x: torch.sigmoid(-beta*x)
+    density = sdf_to_density(sdf_grid)
+
+    hh = sdf_grid.shape[-1]
+    volumes = Volumes(
+            features=features,
+            densities = density,
+            voxel_size=2*half_size/hh,
+        )
+    images = renderer(cameras=cameras, volumes=volumes)[0]
+    # images = images.permute(0, 3, 1, 2)
+    images, masks = flip_transpose_canvas(images)
+    images = images * masks + (1 - masks)
+    return {'image': images, 'mask': masks}    
+
+
+def get_cTw_list(center, dist, view_mod, T=21):
+    """get extrinsic matrix list
+
+    Args:
+        center (_type_): (N, 3)
+        dist (_type_): _description_
+    """
+    N = len(center)
+    device = center.device
+    center_exp = center.unsqueeze(0).expand(T, N, 3).reshape(T*N, 3)
+
+    azel = get_view_list(view_mod, device, T)  # T, 2
+    azel = azel.unsqueeze(1).repeat(1, N, 1).reshape(T*N, 2)
+    R = geom_utils.azel_to_rot(azel, homo=False)
+
+    tsl = torch.zeros([T, N, 3], device=device)  # TODO
+    tsl[..., 2] = dist
+    tsl = tsl.reshape(T*N, 3)
+
+    nTw = geom_utils.rt_to_homo(torch.eye(3, device=device)[None].repeat(T*N, 1, 1), -center_exp)
+    cTn = geom_utils.rt_to_homo(R, tsl)
+    cTw = cTn @ nTw
+
+    cTw = cTw.reshape(T, N, 4, 4)
+    return cTw
+
+
+def render_sdf_grid_rot(sdf_grid, view_mod='az', cameras=None, time_len=21, f=10, half_size=1, **kwargs):
+    """rotate around volume center"""
+    print('Currently, vol rot only works for trival volume')
+    volume = sdf_grid
+    N = len(volume)
+    device = volume.device
+    center = torch.zeros([N, 3], device=device)
+
+    ratio = 0.8
+    dist = f * half_size / ratio
+
+    cTw_list = get_cTw_list(center, dist, view_mod, T=time_len)
+    
+    image_list = []
+    for t in range(time_len):
+        cTw = cTw_list[t]
+        R, T, _ = geom_utils.homo_to_rt(cTw)
+        cameras = PerspectiveCameras(f, R=R.transpose(-1, -2), T=T, ).to(device)
+        image = render_sdf_grid(sdf_grid, cameras, half_size=half_size, **kwargs)
+        image_list.append(image['image'])
+
+    return image_list
+
+
 def render_geom_rot(geom: Union[Meshes, Pointclouds],
                     view_mod='az', scale_geom=False, 
                     view_centric=False, cameras: PerspectiveCameras = None, **kwargs):
@@ -768,7 +873,6 @@ def render_geom_rot(geom: Union[Meshes, Pointclouds],
     N = len(geom)
     device = geom.device
     render = get_render_func(geom)
-
     if cameras is None:
         cameras = PerspectiveCameras(10, device=device)
 
@@ -776,6 +880,7 @@ def render_geom_rot(geom: Union[Meshes, Pointclouds],
         bbnx_max = torch.max(verts, dim=1, keepdim=False)[0]  # (N, 1, 3)
         bbnx_min = torch.min(verts, dim=1, keepdim=False)[0]  # (N, 1, 3)
         width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N, 1, 1)
+        width = width.clamp(min=1e-5)
 
         scale = Scale(2/width, device=device)
         # import pdb; pdb.set_trace()
@@ -955,7 +1060,7 @@ def unproj_depth_to_xyz(depth: torch.Tensor, camera: PerspectiveCameras = None, 
 
     ys, xs = torch.meshgrid(
         torch.linspace(-1, 1, H),
-        torch.linspace(-1, 1, W)
+        torch.linspace(-1, 1, W), indexing='ij'
     )  # (H, W)
     ys = ys.unsqueeze(0).expand(N, H, W).to(device)
     xs = xs.unsqueeze(0).expand(N, H, W).to(device)
@@ -1540,30 +1645,55 @@ def batch_sdf_to_meshes(sdf: Callable, batch_size, total_max_batch=32 ** 3, boun
         meshes.textures = TexturesVertex(torch.ones([batch_size, 0, 3]).cuda())
     return meshes
 
+def create_sdf_grid(bs, reso, lim, order='zyx', device='cpu'):
+    """create a sdf grid
+    :param N: grid size
+    :param lim: grid range
+    :param order: xyz or zyx
+    :return: xyz: (B, H, H, H 3) from range(-lim, lim)
+    """
+    N = reso
+    d, h, w = torch.meshgrid(
+        torch.linspace(-lim, lim, N),
+        torch.linspace(-lim, lim, N),
+        torch.linspace(-lim, lim, N), indexing='ij')
+    xyz = torch.stack([w, h, d], dim=-1).to(device)
+    xyz = xyz.unsqueeze(0).repeat(bs, 1, 1, 1, 1)  # (B, H, H, H, 3)
+    if order == 'zyx':
+        xyz = xyz.flip(-1)
+    return xyz
 
-def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=False):
+
+def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=True, offset=None):
     """transform to bSdf, for outside of the boundary, 
     set to sdf + eucidean distance to boundary
-    assume voxels are in zyx order
+    assume voxels are in zyx(DHW) order
     :param aSdf: (B, 1, H, H, H)
     :param bTa: (B, 4, 4)
+    : align_corners=True, which is consistent with marching cube but not the same as
     :return: bSdf: (B, 1, H, H, H) bXyz: (B, H, H, H, 3)
     """
     B = len(aSdf)
     device = aSdf.device
     if order == 'zyx':
         aSdf = aSdf.transpose(-1, -3)
-
+    
     d, h, w = torch.meshgrid(
         torch.linspace(-lim, lim, N),
         torch.linspace(-lim, lim, N),
         torch.linspace(-lim, lim, N), 
+        indexing='ij'
     )
     bXyz = torch.stack([w, h, d], dim=-1)  # (N, N, N, 3)
     # bXyz = torch.stack([d, h, w], dim=-1)  # (N, N, N, 3)
     bXyz = bXyz.to(device)
     bXyz = bXyz.reshape(-1, 3)  # (N**3, 3)
     bXyz = bXyz[None].repeat(B, 1, 1)  # (B, N**3, 3)
+    if offset is not None:
+        if isinstance(offset, float):
+            bXyz = bXyz + offset
+        else:
+            bXyz = bXyz + offset.reshape(B, 1, 3)
 
     aTb = geom_utils.inverse_rt(mat=bTa, return_mat=True)
     aXyz = apply_transform(bXyz, aTb)  # (B, N**3, 3)
@@ -1579,14 +1709,17 @@ def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=False)
     
     # (B, N**3, 3). extra_dist is the l2-distance to rectantle [-1, 1]
     extra_dist_in_a = (torch.abs(aXyz) - 1).clamp_(min=0)
-    extra_dist_in_a = (extra_dist_in_a**2).sum(dim=-1, keepdim=True).sqrt()
-    extra_dist = extra_dist_in_a * bTa_scale[..., 0].reshape(B, 1, 1)
+    extra_dist_in_a = (extra_dist_in_a**2).sum(dim=-1).sqrt()  # (N, D, H, W)
+    extra_dist = extra_dist_in_a * bTa_scale[..., 0].reshape(B, 1, 1, 1)
     bSdf = bSdf_in_b + extra_dist.reshape(B, 1, N, N, N)
+
+    # bSdf = bSdf_in_b
+    # print('extra dist', extra_dist)
 
     bXyz = bXyz.reshape(B, N, N, N, 3)
     if order == 'zyx':
         bSdf = bSdf.transpose(-1, -3)
-        bXyz = bXyz.flip(-1)
+        bXyz = bXyz.flip(-1) # x and z are flipped
     return bSdf, bXyz
 
 
@@ -1615,6 +1748,9 @@ def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=
         faces_list.append(faces)
         tex_list.append(torch.ones_like(verts))
     meshes = Meshes(verts_list, faces_list).to(device)
+    offset = kwargs.get('offset', None)
+    if offset is not None:
+        meshes = meshes.update_padded(meshes.verts_padded() + offset[:, None, :])    
     if meshes.isempty():
         meshes.textures = TexturesVertex(torch.ones([batch_size, 0, 3]).to(sdf_values))
     return meshes
@@ -1754,7 +1890,7 @@ def convert_sdf_samples_to_ply(
     """
     start_time = time.time()
 
-    numpy_3d_sdf_tensor = pytorch_3d_sdf_tensor.numpy()
+    numpy_3d_sdf_tensor = pytorch_3d_sdf_tensor.detach().numpy()
     if add_bound:
         N = numpy_3d_sdf_tensor.shape[0]
         voxel_size = voxel_size * (N - 1) / (N + 1)
@@ -1773,6 +1909,7 @@ def convert_sdf_samples_to_ply(
         #     numpy_3d_sdf_tensor, level=0.0, spacing=[voxel_size] * 3
         # )
     except ValueError:
+        print('marching_cubes failed', numpy_3d_sdf_tensor.min(), numpy_3d_sdf_tensor.max())
         return torch.empty([0, 3], dtype=torch.float32), torch.empty([0, 3], dtype=torch.long)
 
     # transform from voxel coordinates to camera coordinates
@@ -1995,9 +2132,9 @@ def make_grid(N, halfsize=1, device='cpu', order='zyx'):
     y_l = torch.linspace(-halfsize, halfsize, N)
     z_l = torch.linspace(-halfsize, halfsize, N)
     if order == 'zyx':
-        z, y, x = torch.meshgrid(z_l, y_l, x_l)
+        z, y, x = torch.meshgrid(z_l, y_l, x_l, indexing='ij')
     elif order == 'xyz':
-        x, y, z = torch.meshgrid(x_l, y_l, z_l)
+        x, y, z = torch.meshgrid(x_l, y_l, z_l, indexing='ij')
     points_cords = torch.stack([x,y,z], dim=-1).to(device)
 
     return points_cords
@@ -2016,7 +2153,7 @@ def voxelize(mesh: trimesh.Trimesh, reso=32, return_torch=False) -> Tuple[np.nda
     x_l = torch.linspace(-1, 1, reso)
     y_l = torch.linspace(-1, 1, reso)
     z_l = torch.linspace(-1, 1, reso)
-    z, y, x = torch.meshgrid(z_l, y_l, x_l)
+    z, y, x = torch.meshgrid(z_l, y_l, x_l, indexing='ij')
     points_cords = torch.stack([x,y,z], dim=-1)
     
     if isinstance(mesh, trimesh.Trimesh):
