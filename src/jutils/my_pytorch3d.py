@@ -1,10 +1,363 @@
-from typing import List, Tuple, Union, Callable
+import torch.nn.functional as F
+from typing import List, Optional, Tuple, Union, Callable
 import torch
 from pytorch3d.structures import Meshes as MeshesBase
+from pytorch3d.structures import Volumes as VolumeBase
 from pytorch3d.loss.chamfer import _handle_pointcloud_input, knn_gather, knn_points
+from pytorch3d.renderer import MultinomialRaysampler
+from pytorch3d.renderer.implicit.raysampling import (
+    _jiggle_within_stratas, _sample_cameras_and_masks, _pack_ray_bundle, _safe_multinomial,
+    RayBundle, HeterogeneousRayBundle, CamerasBase)
+# class Volumes(VolumeBase):
+#     def __init__(self, densities: _TensorBatch, features: _TensorBatch | None = None, voxel_size: _VoxelSize = 1, volume_translation: _Translation = ...) -> None:
+#         super().__init__(densities, features, voxel_size, volume_translation)
+#         self.voxel_size = voxel_size
+#         self.translation = volume_translation
+# # overwrite pytorch3d: Meshes
 
 
-# overwrite pytorch3d: Meshes
+
+class BatchMultinomialRaysampler(MultinomialRaysampler):
+    """
+    A batched version of MultinomialRaysampler, supports batched min_depth
+    """
+
+    def __init__(
+        self,
+        *,
+        min_x: float,
+        max_x: float,
+        min_y: float,
+        max_y: float,
+        image_width: int,
+        image_height: int,
+        n_pts_per_ray: int,
+        min_depth: float,
+        max_depth: float,
+        n_rays_per_image: Optional[int] = None,
+        n_rays_total: Optional[int] = None,
+        unit_directions: bool = False,
+        stratified_sampling: bool = False,
+    ) -> None:
+        """
+        Args:
+            min_x: The leftmost x-coordinate of each ray's source pixel's center.
+            max_x: The rightmost x-coordinate of each ray's source pixel's center.
+            min_y: The topmost y-coordinate of each ray's source pixel's center.
+            max_y: The bottommost y-coordinate of each ray's source pixel's center.
+            image_width: The horizontal size of the image grid.
+            image_height: The vertical size of the image grid.
+            n_pts_per_ray: The number of points sampled along each ray.
+            min_depth: The minimum depth of a ray-point.
+            max_depth: The maximum depth of a ray-point.
+            n_rays_per_image: If given, this amount of rays are sampled from the grid.
+                `n_rays_per_image` and `n_rays_total` cannot both be defined.
+            n_rays_total: How many rays in total to sample from the cameras provided. The result
+                is as if `n_rays_total_training` cameras were sampled with replacement from the
+                cameras provided and for every camera one ray was sampled. If set returns the
+                HeterogeneousRayBundle with batch_size=n_rays_total.
+                `n_rays_per_image` and `n_rays_total` cannot both be defined.
+            unit_directions: whether to normalize direction vectors in ray bundle.
+            stratified_sampling: if True, performs stratified random sampling
+                along the ray; otherwise takes ray points at deterministic offsets.
+        """
+        super().__init__(min_x=min_x, max_x=max_x, min_y=min_y, max_y=max_y,
+                         image_width=image_width, image_height=image_height,
+                         n_pts_per_ray=n_pts_per_ray, min_depth=min_depth,
+                         max_depth=max_depth, n_rays_per_image=n_rays_per_image,
+                         n_rays_total=n_rays_total, unit_directions=unit_directions,
+                         stratified_sampling=stratified_sampling)
+        
+
+    def forward(
+        self,
+        cameras: CamerasBase,
+        *,
+        mask: Optional[torch.Tensor] = None,
+        min_depth: Optional[float] = None,
+        max_depth: Optional[float] = None,
+        n_rays_per_image: Optional[int] = None,
+        n_pts_per_ray: Optional[int] = None,
+        stratified_sampling: Optional[bool] = None,
+        n_rays_total: Optional[int] = None,
+        **kwargs,
+    ) -> Union[RayBundle, HeterogeneousRayBundle]:
+        """
+        Args:
+            cameras: A batch of `batch_size` cameras from which the rays are emitted.
+            mask: if given, the rays are sampled from the mask. Should be of size
+                (batch_size, image_height, image_width).
+            min_depth: The minimum depth of a ray-point.
+            max_depth: The maximum depth of a ray-point.
+            n_rays_per_image: If given, this amount of rays are sampled from the grid.
+                `n_rays_per_image` and `n_rays_total` cannot both be defined.
+            n_pts_per_ray: The number of points sampled along each ray.
+            stratified_sampling: if set, overrides stratified_sampling provided
+                in __init__.
+            n_rays_total: How many rays in total to sample from the cameras provided. The result
+                is as if `n_rays_total_training` cameras were sampled with replacement from the
+                cameras provided and for every camera one ray was sampled. If set returns the
+                HeterogeneousRayBundle with batch_size=n_rays_total.
+                `n_rays_per_image` and `n_rays_total` cannot both be defined.
+        Returns:
+            A named tuple RayBundle or dataclass HeterogeneousRayBundle with the
+            following fields:
+
+            origins: A tensor of shape
+                `(batch_size, s1, s2, 3)`
+                denoting the locations of ray origins in the world coordinates.
+            directions: A tensor of shape
+                `(batch_size, s1, s2, 3)`
+                denoting the directions of each ray in the world coordinates.
+            lengths: A tensor of shape
+                `(batch_size, s1, s2, n_pts_per_ray)`
+                containing the z-coordinate (=depth) of each ray in world units.
+            xys: A tensor of shape
+                `(batch_size, s1, s2, 2)`
+                containing the 2D image coordinates of each ray or,
+                if mask is given, `(batch_size, n, 1, 2)`
+            Here `s1, s2` refer to spatial dimensions.
+            `(s1, s2)` refer to (highest priority first):
+                - `(1, 1)` if `n_rays_total` is provided, (batch_size=n_rays_total)
+                - `(n_rays_per_image, 1) if `n_rays_per_image` if provided,
+                - `(n, 1)` where n is the minimum cardinality of the mask
+                        in the batch if `mask` is provided
+                - `(image_height, image_width)` if nothing from above is satisfied
+
+            `HeterogeneousRayBundle` has additional members:
+                - camera_ids: tensor of shape (M,), where `M` is the number of unique sampled
+                    cameras. It represents unique ids of sampled cameras.
+                - camera_counts: tensor of shape (M,), where `M` is the number of unique sampled
+                    cameras. Represents how many times each camera from `camera_ids` was sampled
+
+            `HeterogeneousRayBundle` is returned if `n_rays_total` is provided else `RayBundle`
+            is returned.
+        """
+        n_rays_total = n_rays_total or self._n_rays_total
+        n_rays_per_image = n_rays_per_image or self._n_rays_per_image
+        if (n_rays_total is not None) and (n_rays_per_image is not None):
+            raise ValueError(
+                "`n_rays_total` and `n_rays_per_image` cannot both be defined."
+            )
+        if n_rays_total:
+            (
+                cameras,
+                mask,
+                camera_ids,  # unique ids of sampled cameras
+                camera_counts,  # number of times unique camera id was sampled
+                # `n_rays_per_image` is equal to the max number of times a simgle camera
+                # was sampled. We sample all cameras at `camera_ids` `n_rays_per_image` times
+                # and then discard the unneeded rays.
+                # pyre-ignore[9]
+                n_rays_per_image,
+            ) = _sample_cameras_and_masks(n_rays_total, cameras, mask)
+        else:
+            # pyre-ignore[9]
+            camera_ids: torch.LongTensor = torch.arange(len(cameras), dtype=torch.long)
+
+        batch_size = cameras.R.shape[0]
+        device = cameras.device
+
+        # expand the (H, W, 2) grid batch_size-times to (B, H, W, 2)
+        xy_grid = self._xy_grid.to(device).expand(batch_size, -1, -1, -1)
+
+        if mask is not None and n_rays_per_image is None:
+            # if num rays not given, sample according to the smallest mask
+            n_rays_per_image = (
+                n_rays_per_image or mask.sum(dim=(1, 2)).min().int().item()
+            )
+
+        if n_rays_per_image is not None:
+            if mask is not None:
+                assert mask.shape == xy_grid.shape[:3]
+                weights = mask.reshape(batch_size, -1)
+            else:
+                # it is probably more efficient to use torch.randperm
+                # for uniform weights but it is unlikely given that randperm
+                # is not batched and does not support partial permutation
+                _, width, height, _ = xy_grid.shape
+                weights = xy_grid.new_ones(batch_size, width * height)
+            # pyre-fixme[6]: For 2nd param expected `int` but got `Union[bool,
+            #  float, int]`.
+            rays_idx = _safe_multinomial(weights, n_rays_per_image)[..., None].expand(
+                -1, -1, 2
+            )
+
+            xy_grid = torch.gather(xy_grid.reshape(batch_size, -1, 2), 1, rays_idx)[
+                :, :, None
+            ]
+
+        min_depth = min_depth if min_depth is not None else self._min_depth
+        max_depth = max_depth if max_depth is not None else self._max_depth
+        n_pts_per_ray = (
+            n_pts_per_ray if n_pts_per_ray is not None else self._n_pts_per_ray
+        )
+        stratified_sampling = (
+            stratified_sampling
+            if stratified_sampling is not None
+            else self._stratified_sampling
+        )
+
+        ray_bundle = _xy_to_ray_bundle(
+            cameras,
+            xy_grid,
+            min_depth,
+            max_depth,
+            n_pts_per_ray,
+            self._unit_directions,
+            stratified_sampling,
+        )
+
+        return (
+            # pyre-ignore[61]
+            _pack_ray_bundle(ray_bundle, camera_ids, camera_counts)
+            if n_rays_total
+            else ray_bundle
+        )
+
+
+def _xy_to_ray_bundle(
+    cameras: CamerasBase,
+    xy_grid: torch.Tensor,
+    min_depth: float,
+    max_depth: float,
+    n_pts_per_ray: int,
+    unit_directions: bool,
+    stratified_sampling: bool = False,
+) -> RayBundle:
+    """
+    Extends the `xy_grid` input of shape `(batch_size, ..., 2)` to rays.
+    This adds to each xy location in the grid a vector of `n_pts_per_ray` depths
+    uniformly spaced between `min_depth` and `max_depth`.
+
+    The extended grid is then unprojected with `cameras` to yield
+    ray origins, directions and depths.
+
+    Args:
+        cameras: cameras object representing a batch of cameras.
+        xy_grid: torch.tensor grid of image xy coords.
+        min_depth: The minimum depth of each ray-point.
+        max_depth: The maximum depth of each ray-point.
+        n_pts_per_ray: The number of points sampled along each ray.
+        unit_directions: whether to normalize direction vectors in ray bundle.
+        stratified_sampling: if True, performs stratified sampling in n_pts_per_ray
+            bins for each ray; otherwise takes n_pts_per_ray deterministic points
+            on each ray with uniform offsets.
+    """
+    batch_size = xy_grid.shape[0]
+    spatial_size = xy_grid.shape[1:-1]
+    n_rays_per_image = spatial_size.numel()
+
+    # ray z-coords
+    rays_zs = xy_grid.new_empty((0,))
+    if n_pts_per_ray > 0:
+        # CMT: changed
+        if not torch.is_tensor(min_depth):
+            min_depth = torch.zeros([batch_size, 1], device=xy_grid.device) + min_depth
+        if not torch.is_tensor(max_depth):
+            max_depth = torch.zeros([batch_size, 1], device=xy_grid.device) + max_depth
+        min_depth = min_depth[:, None]  # (N, 1)
+        max_depth = max_depth[:, None]  # (N, 1)
+        depths = torch.linspace(0, 1, n_pts_per_ray, dtype=xy_grid.dtype, device=xy_grid.device)[None]  # (1, D)
+        print(depths.shape, min_depth.shape)
+        depths = depths * (max_depth - min_depth) + min_depth  # (N, D)
+        rays_zs = depths.unsqueeze(1).expand(batch_size, n_rays_per_image, n_pts_per_ray)
+        print('ray zs', rays_zs.shape, xy_grid.shape, len(cameras))
+
+        # depths = torch.linspace(
+        #     min_depth,
+        #     max_depth,
+        #     n_pts_per_ray,
+        #     dtype=xy_grid.dtype,
+        #     device=xy_grid.device,
+        # )
+        # rays_zs = depths.unsqueeze(1).expand(batch_size, n_rays_per_image, n_pts_per_ray)
+
+
+        if stratified_sampling:
+            rays_zs = _jiggle_within_stratas(rays_zs)
+
+    # make two sets of points at a constant depth=1 and 2
+    to_unproject = torch.cat(
+        (
+            xy_grid.view(batch_size, 1, n_rays_per_image, 2)
+            .expand(batch_size, 2, n_rays_per_image, 2)
+            .reshape(batch_size, n_rays_per_image * 2, 2),
+            torch.cat(
+                (
+                    xy_grid.new_ones(batch_size, n_rays_per_image, 1),
+                    2.0 * xy_grid.new_ones(batch_size, n_rays_per_image, 1),
+                ),
+                dim=1,
+            ),
+        ),
+        dim=-1,
+    )
+
+    # unproject the points
+    unprojected = cameras.unproject_points(to_unproject, from_ndc=True)
+
+    # split the two planes back
+    rays_plane_1_world = unprojected[:, :n_rays_per_image]
+    rays_plane_2_world = unprojected[:, n_rays_per_image:]
+
+    # directions are the differences between the two planes of points
+    rays_directions_world = rays_plane_2_world - rays_plane_1_world
+
+    # origins are given by subtracting the ray directions from the first plane
+    rays_origins_world = rays_plane_1_world - rays_directions_world
+
+    if unit_directions:
+        rays_directions_world = F.normalize(rays_directions_world, dim=-1)
+
+    return RayBundle(
+        rays_origins_world.view(batch_size, *spatial_size, 3),
+        rays_directions_world.view(batch_size, *spatial_size, 3),
+        rays_zs.view(batch_size, *spatial_size, n_pts_per_ray),
+        xy_grid,
+    )
+
+
+
+class BatchedNDCMultinomialRaysampler(BatchMultinomialRaysampler):
+
+    def __init__(
+        self,
+        *,
+        image_width: int,
+        image_height: int,
+        n_pts_per_ray: int,
+        min_depth: float,
+        max_depth: float,
+        n_rays_per_image: Optional[int] = None,
+        n_rays_total: Optional[int] = None,
+        unit_directions: bool = False,
+        stratified_sampling: bool = False,
+    ) -> None:
+        if image_width >= image_height:
+            range_x = image_width / image_height
+            range_y = 1.0
+        else:
+            range_x = 1.0
+            range_y = image_height / image_width
+
+        half_pix_width = range_x / image_width
+        half_pix_height = range_y / image_height
+        super().__init__(
+            min_x=range_x - half_pix_width,
+            max_x=-range_x + half_pix_width,
+            min_y=range_y - half_pix_height,
+            max_y=-range_y + half_pix_height,
+            image_width=image_width,
+            image_height=image_height,
+            n_pts_per_ray=n_pts_per_ray,
+            min_depth=min_depth,
+            max_depth=max_depth,
+            n_rays_per_image=n_rays_per_image,
+            n_rays_total=n_rays_total,
+            unit_directions=unit_directions,
+            stratified_sampling=stratified_sampling,
+        )
 
 
 class Meshes(MeshesBase):
