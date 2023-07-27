@@ -758,6 +758,60 @@ def center_norm_geom(geom,  dist=20, max_norm=1):
     return cGeom, transfm
 
 
+def get_cTw_list(dist, view_mod, T=21, center=None, nTw=None):
+    """get extrinsic matrix list
+
+    Args:
+        center (_type_): (N, 3)
+        dist (_type_): _description_
+    """
+    assert center is not None or nTw is not None, 'Specify either center or nTw'
+    if nTw is None:
+        N = len(center)
+        device = center.device
+        nTw = geom_utils.rt_to_homo(torch.eye(3, device=device)[None].repeat(N, 1, 1), -center)  # (N, 4, 4)
+    
+    device = nTw.device
+    N = len(nTw)
+    nTw_exp = nTw[None].repeat(T, 1, 1, 1).reshape(T*N, 4, 4)
+
+    azel = get_view_list(view_mod, device, T)  # T, 2
+    azel = azel.unsqueeze(1).repeat(1, N, 1).reshape(T*N, 2)
+    R = geom_utils.azel_to_rot(azel, homo=False)
+
+    tsl = torch.zeros([T, N, 3], device=device)  # TODO
+    tsl[..., 2] = dist
+    tsl = tsl.reshape(T*N, 3)
+
+    cTn = geom_utils.rt_to_homo(R, tsl)
+    cTw = cTn @ nTw_exp
+
+    cTw = cTw.reshape(T, N, 4, 4)
+    return cTw
+
+
+def get_nTw(geom, new_center=None, new_scale=1):
+    """get normalization transformation, that scale the geometry to [-1, 1]
+    Args:
+        geom (_type_): _description_
+    """
+    device = geom.device
+    verts = get_verts(geom)  # (N, V, 3)
+    # get bounding bbox
+    bbnx_max = torch.max(verts, dim=1, keepdim=False)[0]  # (N, 1, 3)
+    bbnx_min = torch.min(verts, dim=1, keepdim=False)[0]  # (N, 1, 3)
+    width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N, 1, 1)
+    width = width.clamp(min=1e-5)
+    if new_center is None:
+        new_center = (bbnx_max + bbnx_min) / 2  # (N, 3)
+
+    tsl = Translate(-new_center, device=device)
+    scale = Scale(2*new_scale / width, device=device)
+    nTw = tsl.compose(scale)
+    nTw = nTw.get_matrix().transpose(-1, -2)
+    return nTw
+
+
 def render_sdf_grid(sdf_grid, cameras: PerspectiveCameras, 
                     features=None, out_size=256, half_size=1,
                     sdf_to_density=None, beta=100, order='zyx', **kwargs):
@@ -766,7 +820,7 @@ def render_sdf_grid(sdf_grid, cameras: PerspectiveCameras,
     if order=='zyx':
         sdf_grid = sdf_grid.transpose(-1, -3)
     tsl =cTw[..., :3, 3]
-    z_dist = tsl[..., 2].abs()
+    z_dist = tsl[..., 2:3].abs()
     raysampler = BatchedNDCMultinomialRaysampler(
         image_width=H,
         image_height=H,
@@ -795,6 +849,7 @@ def render_sdf_grid(sdf_grid, cameras: PerspectiveCameras,
     density = sdf_to_density(sdf_grid)
 
     hh = sdf_grid.shape[-1]
+    
     volumes = Volumes(
             features=features,
             densities = density,
@@ -807,60 +862,67 @@ def render_sdf_grid(sdf_grid, cameras: PerspectiveCameras,
     return {'image': images, 'mask': masks}    
 
 
-def get_cTw_list(center, dist, view_mod, T=21):
-    """get extrinsic matrix list
-
-    Args:
-        center (_type_): (N, 3)
-        dist (_type_): _description_
-    """
-    N = len(center)
-    device = center.device
-    center_exp = center.unsqueeze(0).expand(T, N, 3).reshape(T*N, 3)
-
-    azel = get_view_list(view_mod, device, T)  # T, 2
-    azel = azel.unsqueeze(1).repeat(1, N, 1).reshape(T*N, 2)
-    R = geom_utils.azel_to_rot(azel, homo=False)
-
-    tsl = torch.zeros([T, N, 3], device=device)  # TODO
-    tsl[..., 2] = dist
-    tsl = tsl.reshape(T*N, 3)
-
-    nTw = geom_utils.rt_to_homo(torch.eye(3, device=device)[None].repeat(T*N, 1, 1), -center_exp)
-    cTn = geom_utils.rt_to_homo(R, tsl)
-    cTw = cTn @ nTw
-
-    cTw = cTw.reshape(T, N, 4, 4)
-    return cTw
-
-
-def render_sdf_grid_rot(sdf_grid, view_mod='az', cameras=None, time_len=21, f=10, half_size=1, **kwargs):
+def render_sdf_grid_rot(sdf_grid, view_mod='az', cameras=None, time_len=21, f=10, r=0.8, half_size=1, new_bound=1, nTw=None, **kwargs):
     """rotate around volume center"""
-    print('Currently, vol rot only works for trival volume')
+    print('Currently, vol rot only works for trival volume: cneter=0, half_size=1?')
     volume = sdf_grid
     N = len(volume)
     device = volume.device
     center = torch.zeros([N, 3], device=device)
 
-    ratio = 0.8
-    dist = f * half_size / ratio
-
-    cTw_list = get_cTw_list(center, dist, view_mod, T=time_len)
+    dist = f * new_bound / r
+    # if nTw is not None:
+        # _, _, nTw_s = geom_utils.homo_to_rt(nTw)
+        # dist = dist / nTw_s[..., 0]
+    cTw_list = get_cTw_list(dist, view_mod, T=time_len, center=center, nTw=nTw)  # may have some scale factor init.
     
     image_list = []
     for t in range(time_len):
         cTw = cTw_list[t]
-        R, T, _ = geom_utils.homo_to_rt(cTw)
+        R, T, s = geom_utils.homo_to_rt(cTw)
         cameras = PerspectiveCameras(f, R=R.transpose(-1, -2), T=T, ).to(device)
-        image = render_sdf_grid(sdf_grid, cameras, half_size=half_size, **kwargs)
+        image = render_sdf_grid(sdf_grid, cameras, half_size=half_size*s[..., 0:1], **kwargs)
         image_list.append(image['image'])
 
     return image_list
 
 
+def render_geom_rot_v2(wGeom: Union[Meshes, Pointclouds],
+                    view_mod='az', scale_geom=True, 
+                    view_centric=False, cameras: PerspectiveCameras = None, 
+                    f=10, r=0.8, new_bound=1, time_len=21,
+                    nTw=None, **kwargs):
+    geom = wGeom
+    N = len(geom)
+    device = geom.device
+    render = get_render_func(geom)
+    if cameras is None:
+        # ??????????
+        cameras = PerspectiveCameras(f, device=device)
+        if nTw is None:
+            if scale_geom:
+                nTw = get_nTw(geom, new_scale=new_bound)
+            else:
+                nTw = torch.eye(4)[None].repeat(N, 1, 1).to(device)
+    else:
+        raise NotImplementedError('todo')
+    
+    dist = f * new_bound / r
+    cTw_list = get_cTw_list(dist, view_mod, time_len, nTw=nTw)
+
+    image_list = []
+    for t in range(time_len):
+        cTw = cTw_list[t]
+        cGeom = apply_transform(wGeom, cTw)
+        image = render(cGeom, cameras, **kwargs)
+        image_list.append(image['image'])
+    return image_list
+
+
 def render_geom_rot(geom: Union[Meshes, Pointclouds],
                     view_mod='az', scale_geom=False, 
-                    view_centric=False, cameras: PerspectiveCameras = None, **kwargs):
+                    view_centric=False, cameras: PerspectiveCameras = None, 
+                    **kwargs):
     """
     az / el rotate around up-axis in either object frame, or viewer frame.
     2 steps: 1) convert object frame. 2) get view list

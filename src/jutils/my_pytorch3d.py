@@ -256,13 +256,11 @@ def _xy_to_ray_bundle(
             min_depth = torch.zeros([batch_size, 1], device=xy_grid.device) + min_depth
         if not torch.is_tensor(max_depth):
             max_depth = torch.zeros([batch_size, 1], device=xy_grid.device) + max_depth
-        min_depth = min_depth[:, None]  # (N, 1)
-        max_depth = max_depth[:, None]  # (N, 1)
+        min_depth = min_depth.view(batch_size, 1)  # (N, 1)
+        max_depth = max_depth.view(batch_size, 1)  # (N, 1)
         depths = torch.linspace(0, 1, n_pts_per_ray, dtype=xy_grid.dtype, device=xy_grid.device)[None]  # (1, D)
-        print(depths.shape, min_depth.shape)
         depths = depths * (max_depth - min_depth) + min_depth  # (N, D)
         rays_zs = depths.unsqueeze(1).expand(batch_size, n_rays_per_image, n_pts_per_ray)
-        print('ray zs', rays_zs.shape, xy_grid.shape, len(cameras))
 
         # depths = torch.linspace(
         #     min_depth,
