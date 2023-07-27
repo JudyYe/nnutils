@@ -13,6 +13,7 @@ from pytorch3d.structures import Meshes
 from pytorch3d.transforms import Transform3d, Rotate, Translate
 from pytorch3d.io import load_obj
 from pytorch3d.renderer import OrthographicCameras
+import pytorch3d.transforms.rotation_conversions as rot_cvt
 
 from manopth.manolayer import ManoLayer
 from manopth.tensutils import th_with_zeros, th_posemap_axisang
@@ -108,7 +109,7 @@ def get_mean_pose(model='mano', tensor=True, device='cpu'):
 
 
 class ManopthWrapper(nn.Module):
-    def __init__(self, mano_path='/home/yufeiy2/scratch/pretrain/smpl/mano_v1_2/models', side='right', **kwargs):
+    def __init__(self, mano_path='/private/home/yufeiy2/scratch/pretrain/smpl/mano_v1_2/models', side='right', **kwargs):
         super().__init__()
         self.mano_layer_right = ManoLayer(
             mano_root=mano_path, side=side, 
@@ -266,7 +267,7 @@ class ManopthWrapper(nn.Module):
         return cTh_transform
 
     def _forward_layer(self, pose, trans, **kwargs):
-        verts, joints = self.mano_layer_right(pose, th_trans=trans, **kwargs) # in MM
+        verts, joints = self.mano_layer_right(pose, th_trans=trans, **kwargs)[0:2] # in MM
         verts /= (1000 / self.metric)
         joints /= (1000 / self.metric)
 

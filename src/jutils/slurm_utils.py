@@ -167,14 +167,14 @@ def add_slurm_args(arg_parser):
     arg_parser.add_argument("--sl_time",default=48, type=int, help='timeout in hours')  # in ours hrs
     arg_parser.add_argument("--sl_name", default='dev', type=str)  
     arg_parser.add_argument("--sl_gpu_mem_gb", default=None, type=str)  
-    arg_parser.add_argument("--sl_dir", default='/home/yufeiy2/slurm_cache_shot', type=str)  
+    arg_parser.add_argument("--sl_dir", default='/private/home/yufeiy2/slurm_cache_shot', type=str)  
     arg_parser.add_argument("--sl_work",default=10, type=int)
     arg_parser.add_argument("--sl_node",default=1, type=int)  # 16 hrs
     arg_parser.add_argument("--sl_nodelist",default=None, type=str)  # 16 hrs
     arg_parser.add_argument("--sl_mem",default=None, type=int)  # 16 hrs
     arg_parser.add_argument("--sl_ngpu",default=1, type=int)
     arg_parser.add_argument("--sl_ntask_pnode",default=1, type=int)
-    arg_parser.add_argument("--sl_part",default='abhinavlong,shubhamlong,all', type=str)
+    arg_parser.add_argument("--sl_part",default='learnlab,devlab', type=str)
     return arg_parser
 
 

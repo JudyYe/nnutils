@@ -1,5 +1,54 @@
+import importlib
+from omegaconf import OmegaConf
 import logging
 import torch
+
+
+def get_obj_from_str(string, reload=False):
+    module, cls = string.rsplit(".", 1)
+    if reload:
+        module_imp = importlib.import_module(module)
+        importlib.reload(module_imp)
+    return getattr(importlib.import_module(module, package=None), cls)
+
+
+def instantiate_from_config(config):
+    if not "target" in config:
+        if config == '__is_first_stage__':
+            return None
+        elif config == "__is_unconditional__":
+            return None
+        raise KeyError("Expected key `target` to instantiate.")
+    return get_obj_from_str(config["target"])(**config.get("params", dict()))
+
+
+
+def load_from_checkpoint(ckpt, cfg_file=None, legacy=False, cfg=None):
+    if cfg_file is None:
+        cfg_file = ckpt.split('checkpoints')[0] + '/config.yaml'
+    print('use cfg file', cfg_file)
+    if cfg is None:
+        cfg = OmegaConf.load(cfg_file)
+    print(cfg)
+    if 'resume_ckpt' in cfg.model:
+        cfg.model.resume_ckpt = None  # save time to load base model :p
+    # legacy issue
+    if legacy:
+        model = instantiate_from_config(cfg.model)
+        model.cfg = cfg
+
+    else:
+        module = cfg.model.module
+        model_name = cfg.model.model
+        module = importlib.import_module(module)
+        model_cls = getattr(module, model_name)
+        model = model_cls(cfg, )
+        model.init_model()
+
+    print('loading from checkpoint', ckpt)    
+    weights = torch.load(ckpt)['state_dict']
+    load_my_state_dict(model, weights)
+    return model
 
 
 def load_my_state_dict(model: torch.nn.Module, state_dict, lambda_own=lambda x: x):
@@ -56,3 +105,7 @@ def to_cuda(data, device='cuda'):
 def freeze(model: torch.nn.Module):
     for param in model.parameters():
         param.requires_grad = False
+
+def unfreeze(model: torch.nn.Module):
+    for param in model.parameters():
+        param.requires_grad = True

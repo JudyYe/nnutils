@@ -12,6 +12,27 @@ import pytorch3d.transforms.rotation_conversions as rot_cvt
 from pytorch3d.transforms import Transform3d, Rotate, Translate, Scale
 
 
+def interpolate_axisang(a, b, r):
+    """interpolate axisangle (N, 3) in rotation matrix space by r"""
+    dim = a.shape
+    a = a.reshape(-1, 3)
+    b = b.reshape(-1, 3)
+
+    a_mat = rot_cvt.axis_angle_to_matrix(a)
+    b_mat = rot_cvt.axis_angle_to_matrix(b)
+
+    c_mat = r * a_mat + (1 - r) * b_mat
+
+    # project c_mat into rotation matrix space by SVD
+    # c_mat = c_mat.reshape(N, 3, 3)
+    u, _, v = torch.svd(c_mat)
+    c_mat = torch.matmul(u, v.transpose(1, 2))
+
+    c = rot_cvt.matrix_to_axis_angle(c_mat)
+    c = c.reshape(*dim)
+    return c
+    
+
 def scale_matrix(scale, homo=True):
     """
     :param scale: (..., 3)
@@ -150,6 +171,12 @@ def random_se3(N=1, device='cpu'):
     se3 = matrix_to_se3(rt_to_homo(rot, trans, scale))
     return se3
     
+def delta_mat(rot_stddev, t_stddev, N=1, device='cpu'):
+    jitter_t = torch.rand([N, 3], device=device) * t_stddev * 2 - t_stddev
+    jitter_axiang = torch.rand([N, 3], device=device) *  rot_stddev * 2 - rot_stddev
+    delta_mat = axis_angle_t_to_matrix(jitter_axiang, jitter_t)
+    return delta_mat
+
 
 def jitter_se3(se3, rot_stddev, t_stddev, s_stddev=0):
     N = se3.size(0)
