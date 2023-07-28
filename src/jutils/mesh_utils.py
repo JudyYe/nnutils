@@ -790,18 +790,25 @@ def get_cTw_list(dist, view_mod, T=21, center=None, nTw=None):
     return cTw
 
 
-def get_nTw(geom, new_center=None, new_scale=1):
+def get_nTw(geom: Meshes, new_center=None, new_scale=1):
     """get normalization transformation, that scale the geometry to [-1, 1]
     Args:
         geom (_type_): _description_
     """
     device = geom.device
     verts = get_verts(geom)  # (N, V, 3)
+    # if verts are empty
+    if geom.isempty():
+        nTw = torch.eye(4, device=device)[None].repeat(len(geom), 1, 1)
+        return nTw
     # get bounding bbox
-    bbnx_max = torch.max(verts, dim=1, keepdim=False)[0]  # (N, 1, 3)
-    bbnx_min = torch.min(verts, dim=1, keepdim=False)[0]  # (N, 1, 3)
-    width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N, 1, 1)
-    width = width.clamp(min=1e-5)
+    bbnx_max = torch.max(verts, dim=1, keepdim=False)[0]  # (N, 3)
+    bbnx_min = torch.min(verts, dim=1, keepdim=False)[0]  # (N, 3)
+    width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N,)
+    empty_mask = (width == 0).float()
+    width = empty_mask * 1 + (1-empty_mask) * width
+    # width = width.clamp(min=1e-5)
+    
     if new_center is None:
         new_center = (bbnx_max + bbnx_min) / 2  # (N, 3)
 
@@ -813,7 +820,7 @@ def get_nTw(geom, new_center=None, new_scale=1):
 
 
 def render_sdf_grid(sdf_grid, cameras: PerspectiveCameras, 
-                    features=None, out_size=256, half_size=1,
+                    features=None, out_size=224, half_size=1,
                     sdf_to_density=None, beta=100, order='zyx', **kwargs):
     H = out_size
     cTw = cameras.get_world_to_view_transform().get_matrix().transpose(-1, -2)
@@ -862,9 +869,9 @@ def render_sdf_grid(sdf_grid, cameras: PerspectiveCameras,
     return {'image': images, 'mask': masks}    
 
 
-def render_sdf_grid_rot(sdf_grid, view_mod='az', cameras=None, time_len=21, f=10, r=0.8, half_size=1, new_bound=1, nTw=None, **kwargs):
+def render_sdf_grid_rot(sdf_grid, view_mod='az', cameras=None, time_len=21, 
+                        f=10, r=0.8, half_size=1, new_bound=1, nTw=None, **kwargs):
     """rotate around volume center"""
-    print('Currently, vol rot only works for trival volume: cneter=0, half_size=1?')
     volume = sdf_grid
     N = len(volume)
     device = volume.device
@@ -895,6 +902,9 @@ def render_geom_rot_v2(wGeom: Union[Meshes, Pointclouds],
     geom = wGeom
     N = len(geom)
     device = geom.device
+    if geom.isempty():
+        H = kwargs.get('out_size', 224)
+        return [torch.zeros([N, 3, H, H])]
     render = get_render_func(geom)
     if cameras is None:
         # ??????????
@@ -935,17 +945,22 @@ def render_geom_rot(geom: Union[Meshes, Pointclouds],
     N = len(geom)
     device = geom.device
     render = get_render_func(geom)
+    if geom.isempty():
+        H = kwargs.get('out_size', 224)
+        return [torch.zeros([N, 3, H, H])]
     if cameras is None:
         cameras = PerspectiveCameras(10, device=device)
 
         verts = get_verts(geom)  # N, V, 3 --> N, 1, 3
-        bbnx_max = torch.max(verts, dim=1, keepdim=False)[0]  # (N, 1, 3)
-        bbnx_min = torch.min(verts, dim=1, keepdim=False)[0]  # (N, 1, 3)
-        width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N, 1, 1)
-        width = width.clamp(min=1e-5)
+        # when verts are empty
+        
+        bbnx_max = torch.max(verts, dim=1, keepdim=False)[0]  # (N, 3)
+        bbnx_min = torch.min(verts, dim=1, keepdim=False)[0]  # (N, 3)
+        width, dim = torch.max(bbnx_max - bbnx_min, dim=-1, keepdim=False)  # (N, )
+        empty_mask = (width == 0).float()
+        width = empty_mask * 1 + (1-empty_mask) * width
 
         scale = Scale(2/width, device=device)
-        # import pdb; pdb.set_trace()
         geom_norm = apply_transform(geom, scale)
 
         geom_norm, _ = center_obj(geom_norm)

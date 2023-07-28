@@ -410,16 +410,16 @@ class Meshes(MeshesBase):
             # Identify type of verts and faces.
             if isinstance(verts, list) and isinstance(faces, list):
                 if self._N > 0:
-                    if not (
-                        all(v.device == self.device for v in verts)
-                        and all(f.device == self.device for f in faces)
-                    ):
-                        self._num_verts_per_mesh = torch.tensor(
-                            [len(v) for v in self._verts_list], device=self.device
-                        )
-                        self._num_faces_per_mesh = torch.tensor(
-                            [len(f) for f in self._faces_list], device=self.device
-                        )
+                    # if not (
+                    #     all(v.device == self.device for v in verts)
+                    #     and all(f.device == self.device for f in faces)
+                    # ):
+                    self._num_verts_per_mesh = torch.tensor(
+                        [len(v) for v in self._verts_list], device=self.device
+                    )
+                    self._num_faces_per_mesh = torch.tensor(
+                        [len(f) for f in self._faces_list], device=self.device
+                    )
             elif torch.is_tensor(verts) and torch.is_tensor(faces):
                 if self._N > 0:
                     # Check that padded faces - which have value -1 - are at the
