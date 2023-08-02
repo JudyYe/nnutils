@@ -5,10 +5,12 @@ import time
 from typing import Any
 import submitit
 from argparse import ArgumentParser
-
+from omegaconf import OmegaConf
+import functools
 import hydra.utils as hydra_utils
 from pathlib import Path
 import logging as log
+
 
 def update_pythonpath_relative_hydra():
     """Update PYTHONPATH to only have absolute paths."""
@@ -24,6 +26,8 @@ def update_pythonpath_relative_hydra():
         # I don't know how else to reliably check whether Hydra is initialized.
         return
     paths = []
+    if "PYTHONPATH" not in os.environ:
+        os.environ["PYTHONPATH"] = "."
     for orig_path in os.environ["PYTHONPATH"].split(":"):
         path = Path(orig_path)
         if not path.is_absolute():
@@ -46,6 +50,59 @@ def wrap_cmd(cmd):
         except OSError:
             pass
         p.wait()
+
+
+def slurm_engine():
+    def main_decorator(task_function):
+        @functools.wraps(task_function)
+        def decorated_main(cfg=None, *args, **kwargs):
+            update_pythonpath_relative_hydra()
+            local_flag = False
+            if cfg is None:
+                local_flag = True
+            engine = cfg.get('engine', None)
+            if engine is not None and engine.cluster == 'slurm':
+                pass
+            else:
+                local_flag = True
+
+            if local_flag:
+                task_function(cfg, *args, **kwargs)
+            else:
+                # asks SLURM to send USR1 signal 30 seconds before the time limit
+                additional_parameters = {}
+                additional_parameters["signal"] = 'SIGUSR1@120'
+                params = {
+                    'timeout_min': cfg.engine.timeout_min,
+                    'slurm_partition': cfg.engine.slurm_partition,
+                    'cpus_per_task': cfg.engine.cpus_per_task,
+                    'gpus_per_node': cfg.engine.gpus_per_node,
+                    'nodes': cfg.engine.nodes,
+                    'tasks_per_node': cfg.engine.tasks_per_node,
+                    'slurm_job_name': cfg.engine.slurm_job_name,
+                    'signal_delay_s': cfg.engine.signal_delay_s,
+                    'slurm_mem_per_gpu': cfg.engine.slurm_mem_per_gpu,
+                }
+                init_params = {
+                    "cluster": cfg.engine.cluster,
+                    "folder": cfg.engine.folder,
+                    "slurm_max_num_timeout": cfg.engine.slurm_max_num_timeout,
+                    }
+                executor = submitit.AutoExecutor(
+                    **init_params)
+                for k, v in cfg.engine.items():
+                    if k not in params and k not in init_params:
+                        additional_parameters[k] = v
+                if additional_parameters['exclude'] is None:
+                    additional_parameters.pop('exclude')
+
+                executor.update_parameters(**params)
+                executor.update_parameters(slurm_additional_parameters=additional_parameters)
+                job = executor.submit(Worker(), task_function, cfg, *args, **kwargs)
+                print(job.job_id, cfg.engine.folder)         
+        return decorated_main
+    
+    return main_decorator
 
 
 def slurm_wrapper_hydra(args, callable_fn, debug=False):
@@ -109,7 +166,7 @@ class Worker:
     #     print('args, kwargs', kwargs)
     #     print('func', func, )
     #     func(**kwargs)
-    def __call__(self, func, args, kwargs):
+    def __call__(self, func, *args, **kwargs):
         print('func', func, 'args', args, 'kwargs', kwargs)
         func(*args, **kwargs)
         
