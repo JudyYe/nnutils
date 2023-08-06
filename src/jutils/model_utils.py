@@ -4,7 +4,7 @@ import logging
 import torch
 
 
-def get_obj_from_str(string, reload=False):
+def get_obj_from_str(string: str, reload=False):
     module, cls = string.rsplit(".", 1)
     if reload:
         module_imp = importlib.import_module(module)

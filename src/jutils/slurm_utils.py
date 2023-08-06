@@ -5,7 +5,6 @@ import time
 from typing import Any
 import submitit
 from argparse import ArgumentParser
-from omegaconf import OmegaConf
 import functools
 import hydra.utils as hydra_utils
 from pathlib import Path
@@ -80,7 +79,7 @@ def slurm_engine():
                     'nodes': cfg.engine.nodes,
                     'tasks_per_node': cfg.engine.tasks_per_node,
                     'slurm_job_name': cfg.engine.slurm_job_name,
-                    'signal_delay_s': cfg.engine.signal_delay_s,
+                    'slurm_signal_delay_s': cfg.engine.slurm_signal_delay_s,
                     'slurm_mem_per_gpu': cfg.engine.slurm_mem_per_gpu,
                 }
                 init_params = {

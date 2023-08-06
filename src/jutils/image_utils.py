@@ -720,14 +720,14 @@ def save_depth(images, fname, text_list=[None], merge=1, col=8, scale=False, zne
     else:
         return merge_image
 
-def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False):
+def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  fps=10):
     """
     :param image_list: [(N, C, H, W), ] * T
     :param fname:
     :return:
     """
 
-    def write_to_gif(gif_name, tensor_list, batch_text=[None], col=8, scale=False):
+    def write_to_gif(gif_name, tensor_list, batch_text=[None], col=8, scale=False,):
         """
         :param gif_name: without ext
         :param tensor_list: list of [(N, C, H, W) ] of len T.
@@ -745,7 +745,7 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False):
                                                 scale=scale)  # numpy (H, W, C) of uint8
             image_list.append(time_slices)
         # write_mp4(image_list, gif_name)
-        write_gif(image_list, gif_name)
+        write_gif(image_list, gif_name, fps=fps)
     # merge write
     if len(image_list) == 0:
         print('not save empty gif list')
@@ -760,11 +760,11 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False):
             write_to_gif(os.path.join(fname, '%d' % n), single_list, [text_list[n]], col=1, scale=scale)
 
 
-def write_gif(image_list, gif_name):
+def write_gif(image_list, gif_name, fps=10):
     if not os.path.exists(os.path.dirname(gif_name)):
         os.makedirs(os.path.dirname(gif_name))
         print('## Make directory: %s' % gif_name)
-    imageio.mimsave(gif_name + '.gif', image_list)
+    imageio.mimsave(gif_name + '.gif', image_list, fps=fps)
     print('save to ', gif_name + '.gif')
 
 

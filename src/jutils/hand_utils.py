@@ -14,6 +14,7 @@ from pytorch3d.transforms import Transform3d, Rotate, Translate
 from pytorch3d.io import load_obj
 from pytorch3d.renderer import OrthographicCameras
 import pytorch3d.transforms.rotation_conversions as rot_cvt
+from einops import rearrange
 
 from manopth.manolayer import ManoLayer
 from manopth.tensutils import th_with_zeros, th_posemap_axisang
@@ -21,24 +22,31 @@ from . import geom_utils, mesh_utils
 
 
 
-def get_jsTn(hand_wrapper, hA, **kwargs):
+def get_jsTn(hand_wrapper, hA, iso=False,):
     hTjs = hand_wrapper.pose_to_transform(hA, False)  # (N, J, 4, 4)
     N, num_j, _, _ = hTjs.size()
     jsTh = geom_utils.inverse_rt(mat=hTjs, return_mat=True)
     hTn = get_nTh(hA=hA, hand_wrapper=hand_wrapper, inverse=True)
+    _, _, hTn_s = geom_utils.homo_to_rt(hTn)
+    _, _, jsTh_s = geom_utils.homo_to_rt(jsTh)
+    # print('scale', hTn_s, jsTh_s)  # x5
     hTx_exp = hTn.unsqueeze(1).repeat(1, num_j, 1, 1)
     jsTx = jsTh @ hTx_exp        
+    if iso:
+        # scale jsPoints to the same scale as nPoints
+        nTh_s_exp = geom_utils.scale_matrix(1/hTn_s).unsqueeze(1)  # (N, 1, 4, 4)
+        jsTx = nTh_s_exp @ jsTx
     return jsTx
 
 
-def transform_nPoints_to_js(hand_wrapper, hA, nPoints, **kwargs):
+def transform_nPoints_to_js(hand_wrapper, hA, nPoints, iso=False, **kwargs):
     """
     embed points to each joints
     nPoints: (N, P, 3? )
     jsPoints: (N, P, J, 3)
     """
     N, P, _ = nPoints.size()
-    jsTn = get_jsTn(hand_wrapper, hA, **kwargs)
+    jsTn = get_jsTn(hand_wrapper, hA, iso=iso, **kwargs)
     
     num_j = jsTn.size(1)
     nPoints_exp = nPoints.view(N, 1, P, 3).expand(N, num_j, P, 3).reshape(N * num_j, P, 3)
@@ -537,31 +545,82 @@ def fk_marker(hTjs, jOffset):
     marker = mesh_utils.pc_to_cubic_meshes(hOffset, red)
     return marker, hOffset
 
+
+def joints_id_to_name(num_joints=21):
+    if num_joints == 21:
+        joints_name = ['wrist', 
+                    'thumb-0', 'thumb-1', 'thumb-2', 'thumb-tip',
+                    'index-0', 'index-1', 'index-2', 'index-tip',
+                    'middle-0', 'middle-1', 'middle-2', 'middle-tip',
+                    'ring-0', 'ring-1', 'ring-2', 'ring-tip',
+                    'little-0', 'little-1', 'little-2', 'little-tip',
+                    ]
+    elif num_joints == 16:
+        joints_name = ['wrist', 
+                    'thumb-0', 'thumb-1', 'thumb-2', 
+                    'index-0', 'index-1', 'index-2', 
+                    'middle-0', 'middle-1', 'middle-2', 
+                    'ring-0', 'ring-1', 'ring-2', 
+                    'little-0', 'little-1', 'little-2', 
+                    ]
+    return joints_name
+
+def vis_joint_transform():
+    # results: https://drive.google.com/file/d/1orabUInS32o5Q7tq8NJ9YH4scFlBkU07/view?usp=sharing
+    device = 'cuda:0'
+    from jutils import plot_utils, image_utils
+    save_dir = '/checkpoint/yufeiy2/result/vis_hA'
+
+    hand_wrapper = ManopthWrapper().to(device)
+    hA = torch.zeros([1, 45], device=device) + hand_wrapper.hand_mean
+    hHand, hJoints = hand_wrapper(None, hA)  # (N, J, 3)
+    hTjs = hand_wrapper.pose_to_transform(hA, False)
+    hHand.textures = mesh_utils.pad_texture(hHand)
+    J = hTjs.shape[1]
+    image_list = []
+    text_list = []
+    for j in range(J):
+        jMarker = plot_utils.create_coord(device, 1, 0.05)
+        hTj = hTjs[:, j]
+        hMarker = mesh_utils.apply_transform(jMarker, hTj)
+        
+        scene = mesh_utils.join_scene([hMarker, hHand])
+
+        image = mesh_utils.render_geom_rot_v2(scene, 'az', time_len=3)[0]
+        image_list.append(image)
+        text_list.append(['J %d' % j])
+    image_utils.save_gif(image_list, osp.join(save_dir, 'joints_trans'), text_list=text_list, fps=2)
+
+
+
+def vis_joint_map():
+    # results: https://drive.google.com/file/d/1orabUInS32o5Q7tq8NJ9YH4scFlBkU07/view?usp=sharing    
+    device = 'cuda:0'
+    from jutils import plot_utils, image_utils
+    save_dir = '/tmp/vis_hA'
+
+    hA = torch.zeros([1, 45])
+    hand_wrapper = hand_utils.ManopthWrapper()
+    hHand, hJoints = hand_wrapper(None, hA)  # (N, J, 3)
+    hHand.textures = mesh_utils.pad_texture(hHand)
+    J = hJoints.shape[1]
+    image_list = []
+    text_list = []
+    for j in range(J):
+        marker = hJoints[:, j:j+1]
+        marker[:, :, 1] += 0.03
+        cubes = plot_utils.pc_to_cubic_meshes(marker, eps=0.01)
+        cubes.textures = mesh_utils.pad_texture(cubes, 'red')
+        scene = mesh_utils.join_scene([cubes, hHand])
+
+        image = mesh_utils.render_geom_rot_v2(scene, 'el', time_len=3)[0]
+        image_list.append(image)
+        text_list.append(['J %d' % j])
+    image_utils.save_gif(image_list, osp.join(save_dir, 'joints'), text_list=text_list, fps=2)
+
+
+
 if __name__ == '__main__':
-    from nnutils import mesh_utils, image_utils
-    wrapper = ManopthWrapper()
-    N = 1
-    device = 'cuda'
-    save_dir = '/checkpoint/yufeiy2/hoi_output/mano_pca'
-
-    # hA = torch.ones([N, 45], device=device) + wrapper.hand_mean
-    # pca = wrapper.pose_to_pca(hA)
-    pca = torch.ones([N, 45], device=device)
-    hA = wrapper.pca_to_pose(pca)
-    hA_hat = wrapper.pca_to_pose(wrapper.pose_to_pca(hA))
-
-    basis = wrapper.th_selected_comps  # D, 45
-    print('basis', torch.matmul(basis, basis.transpose(0, 1)))
-
-
-    zeros = torch.zeros([N, 3], device=device)
-
-    mesh = wrapper(None,  hA, zeros, mode='inner')
-    image_list = mesh_utils.render_geom_rot(mesh, scale_geom=True)
-    image_utils.save_gif(image_list, osp.join(save_dir, 'hA'))
-
-    mesh, _ = wrapper(None,  hA_hat, zeros, mode='inner')
-    image_list = mesh_utils.render_geom_rot(mesh, scale_geom=True)
-    image_utils.save_gif(image_list, osp.join(save_dir, 'hA_hat'))
-    # pca = -torch.ones([N, 45], device=device)
-    # hA = wrapper.pca_to_pose(pca)
+    # vis_joint_map()
+    vis_joint_transform()
+    # vis_han
