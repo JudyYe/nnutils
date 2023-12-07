@@ -12,6 +12,7 @@ import cv2
 import imageio
 import numpy as np
 import torch
+import torch.nn.functional as F
 import torchvision.utils as vutils
 from PIL import Image
 from skimage import measure
@@ -151,7 +152,7 @@ def square_bbox(bbox, pad=0):
 
     x1y1, x2y2 = bbox[..., :2], bbox[..., 2:]
     center = (x1y1 + x2y2) / 2 
-    half_w = torch.max((x2y2 - x1y1) / 2, dim=-1)[0]
+    half_w = torch.max((x2y2 - x1y1) / 2, dim=-1, keepdim=True)[0]
     half_w = half_w * (1 + 2 * pad)
     bbox = torch.cat([center - half_w, center + half_w], dim=-1)
     if is_numpy:
@@ -504,7 +505,43 @@ def imwrite(fname, image):
     os.makedirs(osp.dirname(fname), exist_ok=True)
     imageio.imwrite(fname, image)
 
-    
+
+def warp_images_by_flow(img, flo,):
+    """
+    Args:
+        img (_type_): image of shape [B,C,H,W]
+        flo (_type_): flow of shape [B,2,H,W]
+    """
+    DEVICE = img.device
+    B, C, H, W = img.shape
+    x = torch.arange(W).view(1, -1).expand(H, -1).float().to(DEVICE)
+    y = torch.arange(H).view(-1, 1).expand(-1, W).float().to(DEVICE)
+    grid = torch.stack([x, y], dim=0).unsqueeze(0).expand(B, -1, -1, -1)
+    grid = grid + flo
+    grid[:, 0, :, :] = 2.0 * grid[:, 0, :, :] / (W - 1) - 1.0
+    grid[:, 1, :, :] = 2.0 * grid[:, 1, :, :] / (H - 1) - 1.0
+    grid = grid.permute(0, 2, 3, 1)
+    out = F.grid_sample(img, grid, mode='bilinear', padding_mode='zeros', align_corners=False)
+    return out
+
+
+def save_flows(flows, fname, col=8, ext='.png', **kwargs):
+    """_summary_
+
+    Args:
+        flows (_type_): (N, 2, H, W)
+        fname (_type_): _description_
+    """
+    flow = vutils.make_grid(flows, col)
+    # (2, H, W)
+    flow = flow.cpu().detach().numpy().transpose([1, 2, 0])  # (H, W, 2)
+    flow = flow.astype(np.float32)
+    flow_img = flow_to_image(flow, )  # (N, H, 3)
+
+    os.makedirs(osp.dirname(fname), exist_ok=True)
+    imageio.imwrite(fname + ext, flow_img)
+    return 
+
 
 def save_images(images, fname, text_list=[None], merge=1, col=8, scale=False, bg=None, mask=None, r=0.9,
                 keypoint=None, color=(0, 1, 0), ext='.png'):
@@ -764,6 +801,7 @@ def write_gif(image_list, gif_name, fps=10):
     if not os.path.exists(os.path.dirname(gif_name)):
         os.makedirs(os.path.dirname(gif_name))
         print('## Make directory: %s' % gif_name)
+    # imageio.mimsave(gif_name + '.gif', image_list, duration=len(image_list)/fps)
     imageio.mimsave(gif_name + '.gif', image_list, fps=fps)
     print('save to ', gif_name + '.gif')
 
@@ -1183,18 +1221,22 @@ def save_image(image, fname):
     imageio.imwrite(fname, image)
 
 
-if __name__ == '__main__':
-    import os.path as osp
-    N, H,  W = 1, 32, 32
-    P = 16**2
-    device = 'cuda:0'
+def make_video():
+    import argparse
+    from glob import glob 
+    argparser = argparse.ArgumentParser()
+    argparser.add_argument('--inp', type=str)
+    argparser.add_argument('--out', type=str)
 
-    masks = torch.zeros([N, 1, H, W], device=device)
-    masks[:, :, H // 4:H//4 * 3, W // 4: W // 4 * 3] = 1
-    points = mask_to_points(masks, P)  # (N, P, 2)
-    print(points)
-    canvas = torch.zeros([N, 3, H ,W], device=device)
-    canvas = vis_pts(canvas, points, (0, 255, 0))
-    save_dir = '/checkpoint/yufeiy2/hoi_output/vis_mask'
-    save_images(canvas, osp.join(save_dir, 'canvas'))
-    save_images(masks, osp.join(save_dir, 'masks'))
+    args = argparser.parse_args()
+
+    image_list = sorted(glob(os.path.join(args.inp, '*.png')))
+    image_list = [imageio.imread(each)[..., 0:3] for each in image_list]
+
+    if osp.dirname(args.out) != '':
+        os.makedirs(osp.dirname(args.out), exist_ok=True)
+    imageio.mimsave(args.out, image_list)
+
+
+if __name__ == '__main__':
+    make_video()

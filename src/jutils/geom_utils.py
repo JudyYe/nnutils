@@ -10,6 +10,19 @@ from pytorch3d.transforms.rotation_conversions import random_rotations, rotation
     matrix_to_axis_angle, euler_angles_to_matrix
 import pytorch3d.transforms.rotation_conversions as rot_cvt
 from pytorch3d.transforms import Transform3d, Rotate, Translate, Scale
+from pytorch3d.renderer.cameras import look_at_rotation, look_at_view_transform
+
+def project_back_to_rot(homo):
+    """
+    :param rot: (..., 3, 3)
+    :return: (..., 3, 3)
+    """
+    rot, tsl, scale = homo_to_rt(homo)
+    u, _, v = torch.svd(rot)
+    rot = torch.matmul(u, v.transpose(1, 2))
+
+    mat = rt_to_homo(rot, tsl, scale)
+    return mat
 
 
 def interpolate_axisang(a, b, r):
@@ -119,6 +132,26 @@ def matrix_to_axis_angle_t(mat: torch.Tensor):
     return matrix_to_axis_angle(r), t, s
 
 
+def azel_to_rot_v2(azel, homo=False, t=None):
+    # unit vector location to azimuth az, elevation el
+    # Calculate the unit vector components
+    azim, elev = azel.split([1, 1], -1)  # (..., 1)
+    elev = -elev
+    x = torch.cos(elev) * torch.sin(azim)
+    y = torch.sin(elev)
+    z = torch.cos(elev) * torch.cos(azim)
+
+    xyz = torch.cat([x, y, z], -1)
+    rot = look_at_rotation(xyz, up=((0, 1, 0),), device=azel.device)
+    rot = rot.transpose(-1, -2)
+    
+    if homo:
+        rot = rt_to_homo(rot, t)
+    # # wTc = rot 
+    # rot = inverse_rt(mat=rot, return_mat=True)
+    return rot
+
+
 def azel_to_rot(azel, homo=False, t=None):
     zeros = torch.zeros(list(azel.size())[:-1] +[1]).to(azel)
     euler_angles = torch.cat([azel, zeros], dim=-1)
@@ -162,6 +195,73 @@ def homo_to_rt(mat):
 
     trans = trans.squeeze(-1)
     return rot, trans, scale
+
+
+def uniform_rotation(N=12, axis='y', device='cuda:0'):
+    """
+
+    Args:
+        N (int, optional): _description_. Defaults to 12.
+        state (int, optional): _description_. Defaults to 123.
+        axis (str, optional): _description_. Defaults to 'y'.
+        device (str, optional): _description_. Defaults to 'cuda:0'.
+    Retuns:  rotation matrix in (N, 3, 3), whose axis is looking at the center? 
+
+    """
+
+
+    # make Platonic solid: Icosahedron which as 12 vertices, Dodecahedron which has 20 vertices
+    phi = 1.618
+    if N != 12 and N!=20:
+        return random_rotations(N, device=device)
+
+    if N == 12:
+        vertices = np.array([
+            [0, 1, phi],
+            [0, -1, phi],
+            [0, 1, -phi],
+            [0, -1, -phi],
+            [1, phi, 0],
+            [-1, phi, 0],
+            [1, -phi, 0],
+            [-1, -phi, 0],
+            [phi, 0, 1],
+            [-phi, 0, 1],
+            [phi, 0, -1],
+            [-phi, 0, -1],
+        ])
+    elif N == 20:
+        vertices = np.array([
+            [1, 1, 1],
+            [1, 1, -1],
+            [1, -1, 1],
+            [1, -1, -1],
+            [-1, 1, 1],
+            [-1, 1, -1],
+            [-1, -1, 1],
+            [-1, -1, -1],
+            [0, 1./phi, phi],
+            [0, -1./phi, phi],
+            [0, 1./phi, -phi],
+            [0, -1./phi, -phi],
+            [1./phi, phi, 0, ],
+            [-1./phi, phi, 0, ],
+            [1./phi, -phi, 0, ],
+            [-1./phi, -phi, 0, ],
+            [phi, 0, 1./phi,],
+            [phi, 0, -1./phi,],
+            [-phi, 0, 1./phi,],
+            [-phi, 0, -1./phi,],
+        ])
+        
+    verts = torch.FloatTensor(vertices).to(device)
+    rot = look_at_rotation(verts, device=device, ).transpose(-1, -2)
+    if axis=='y':
+        # rotation x-> x, z -> y, y -> -z 
+        trsl = torch.tensor([[1, 0, 0], [0, 0, 1], [0, -1, 0]], device=device).float()
+        trsl = trsl[None].repeat(N, 1, 1)
+        rot = trsl @ rot
+    return rot
 
 
 def random_se3(N=1, device='cpu'):

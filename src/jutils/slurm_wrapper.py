@@ -21,7 +21,8 @@ def submit_to_slurm(args, unknown):
         args, 
         args.sl_dir, 
         Worker(), 
-        {'cmd': ' '.join(unknown)}
+        {'cmd': ' '.join(unknown)}, 
+         resubmit=False,
     )
     return job
 

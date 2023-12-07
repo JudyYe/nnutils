@@ -5,6 +5,7 @@
 from glob import glob
 
 import os
+import os.path as osp
 import shutil
 
 from flask_table import Col, create_table
@@ -18,6 +19,7 @@ def parse_args():
     parser.add_argument('-w', type=int, default=200, help='')
     parser.add_argument('--data_dir', type=str, default='', help='')
     parser.add_argument('--vis_dir', type=str, default=None, help='')
+    parser.add_argument('--inplace', action='store_true', help='')
     args = parser.parse_args()
     return args
 
@@ -107,7 +109,7 @@ if __name__ == '__main__':
     # html_root = os.path.join(data_dir, args.exp, 'vis_%s' % args.folder)
     # print(html_root)
     os.makedirs(html_root, exist_ok=True)
-    cell_list = sorted(glob(args.data_dir))
+    cell_list = sorted(glob(osp.join(args.data_dir, '*')))
     print(cell_list)
     cell_list = [[e] for e in cell_list]
     print('glob', args.data_dir, len(cell_list), html_root)
@@ -116,4 +118,5 @@ if __name__ == '__main__':
         html_root=html_root,
         cell_list=cell_list,
         width=args.w,
+        inplace=args.inplace,
         )

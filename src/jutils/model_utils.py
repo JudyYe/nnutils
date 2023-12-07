@@ -12,14 +12,15 @@ def get_obj_from_str(string: str, reload=False):
     return getattr(importlib.import_module(module, package=None), cls)
 
 
-def instantiate_from_config(config):
+def instantiate_from_config(config, **kwargs):
     if not "target" in config:
         if config == '__is_first_stage__':
             return None
         elif config == "__is_unconditional__":
             return None
         raise KeyError("Expected key `target` to instantiate.")
-    return get_obj_from_str(config["target"])(**config.get("params", dict()))
+    return get_obj_from_str(config["target"])(**config.get("params", dict()), **kwargs)
+
 
 
 
@@ -34,8 +35,7 @@ def load_from_checkpoint(ckpt, cfg_file=None, legacy=False, cfg=None):
         cfg.model.resume_ckpt = None  # save time to load base model :p
     # legacy issue
     if legacy:
-        model = instantiate_from_config(cfg.model)
-        model.cfg = cfg
+        model = instantiate_from_config(cfg.model, cfg=cfg)
 
     else:
         module = cfg.model.module
@@ -46,6 +46,7 @@ def load_from_checkpoint(ckpt, cfg_file=None, legacy=False, cfg=None):
         model.init_model()
 
     print('loading from checkpoint', ckpt)    
+    # import pdb; pdb.set_trace()
     weights = torch.load(ckpt)['state_dict']
     load_my_state_dict(model, weights)
     return model
@@ -93,14 +94,34 @@ def deep_to(data, device='cuda'):
             data[k] = deep_to(v, device)
     return data
 
+
 def to_cuda(data, device='cuda'):
-    new_data = {}
-    for key in data:
-        if hasattr(data[key], 'to'):
-            new_data[key] = data[key].to(device)
-        else:
-            new_data[key] = data[key]
-    return new_data
+    if hasattr(data, 'to'):
+        return data.to(device)
+    if isinstance(data, list):
+        for i, d in enumerate(data):
+            data[i] = to_cuda(d, device)
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            data[k] = to_cuda(v, device)
+    elif isinstance(data, tuple):
+        data = tuple(to_cuda(d, device) for d in data)
+    return data
+
+
+
+def zero_grad(params, set_to_none=False):
+    for p in params:
+        if p.grad is not None:
+            if set_to_none:
+                p.grad = None
+            else:
+                if p.grad.grad_fn is not None:
+                    p.grad.detach_()
+                else:
+                    p.grad.requires_grad_(False)
+                p.grad.zero_()
+                
 
 def freeze(model: torch.nn.Module):
     for param in model.parameters():

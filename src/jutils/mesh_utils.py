@@ -2,7 +2,7 @@
 # Written by Yufei Ye (https://github.com/JudyYe)
 # --------------------------------------------------------
 from __future__ import print_function
-
+from glob import glob
 import collections
 import functools
 import logging
@@ -51,6 +51,7 @@ from pytorch3d.structures.meshes import join_meshes_as_batch
 from pytorch3d.transforms import (Rotate, Scale, Transform3d, Translate,
                                   euler_angles_to_matrix)
 
+from einops import rearrange
 from . import geom_utils
 from .layers import grid_sample
 from .my_pytorch3d import Meshes, chamfer_distance, BatchedNDCMultinomialRaysampler
@@ -163,7 +164,7 @@ def dump_voxes(filepath, voxels):
         np.savez_compressed(filepath[n] + '.npz', vox=voxels[n, 0])
 
 
-def dump_meshes(mesh_path, meshes: Meshes, ext='.obj'):
+def dump_meshes(mesh_path, meshes: Meshes, ext='.obj', verbose=True):
     """
     :param mesh_path: str or list of str
     :param meshes:
@@ -183,8 +184,8 @@ def dump_meshes(mesh_path, meshes: Meshes, ext='.obj'):
     if len(verts) == 0:
         print('skip empty meshes')
         return
-
-    print('save meshes to ', mesh_path[0])
+    if verbose:
+        print('save meshes to ', mesh_path[0])
 
     for n in range(N):
         os.makedirs(os.path.dirname(mesh_path[n]), exist_ok=True)
@@ -253,6 +254,31 @@ def get_color(color='white', device='cpu'):
     return feature
 
 
+def manifold_mesh(meshes, tmp_dir='/tmp/manifold', manifold_bin='/private/home/yufeiy2/Packages/Manifold/build/manifold', N=2000):
+    device = meshes.device
+    inp_dir = osp.join(tmp_dir, 'inp')
+    dump_meshes(osp.join(inp_dir, 'meshes'), meshes)
+    mesh_list = sorted(glob(osp.join(inp_dir, '*.obj')))
+    print(osp.join(inp_dir, '*.obj'))
+    out_dir = osp.join(tmp_dir, 'out')
+    os.makedirs(out_dir, exist_ok=True)
+    for mesh_file in mesh_list:
+        out_file = mesh_file.replace(inp_dir, out_dir)
+        cmd = manifold_bin + ' ' + mesh_file + ' ' + out_file + ' ' +  f' {N}'
+        os.system(cmd)
+    mesh_list = sorted(glob(osp.join(out_dir, '*.obj')))
+    out_list = []
+    for mesh_file in mesh_list:
+        out_list.append(load_mesh(mesh_file))
+    out_mesh = join_meshes_as_batch(out_list).to(device)
+    cmd = 'rm -rf ' + inp_dir
+    os.system(cmd)
+    cmd = 'rm -rf ' + out_dir
+    os.system(cmd)
+    return out_mesh
+    
+
+
 def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex:
     """
     :param meshes:
@@ -271,6 +297,10 @@ def pad_texture(meshes: Meshes, feature: torch.Tensor='white') -> TexturesVertex
     elif feature == 'red':
         feature = torch.zeros_like(meshes.verts_padded())
         color = torch.FloatTensor([[[254,216/2,183/2]]]).to(meshes.device)  / 255 # * s - s/2
+        feature = feature + color
+    elif feature == 'pink':
+        feature = torch.zeros_like(meshes.verts_padded())
+        color = torch.FloatTensor([[[255,153,204]]]).to(meshes.device)  / 255 # * s - s/2
         feature = feature + color
     elif feature == 'yellow':
         feature = torch.zeros_like(meshes.verts_padded())
@@ -346,7 +376,106 @@ def transform_points(cPoints, cameras:PerspectiveCameras, cTw=None):
     ndcPoints = ndcTc.transform_points(cPoints)[..., :2]
     return ndcPoints
 
-def render_mesh_flow(wMeshes, cam1: PerspectiveCameras, cam2: PerspectiveCameras,
+
+def render_flow_soft_3_lasr(renderer_soft, verts, verts_target, faces):
+    """
+    Render optical flow from two frame 3D vertex locations 
+    """
+    offset = torch.Tensor( renderer_soft.transform.transformer._eye ).cuda()[np.newaxis,np.newaxis]
+    verts_pre = verts[:,:,:3]+offset; verts_pre[:,:,1] = -1*verts_pre[:,:,1]
+    
+    verts_pos_px = renderer_soft.render_mesh(sr.Mesh(verts_pre, faces, 
+                                            textures=verts_target[:,:,:3],texture_type='vertex')).clone()
+    fgmask = verts_pos_px[:,-1]
+    verts_pos_px = verts_pos_px.permute(0,2,3,1)
+    
+    bgmask = (verts_pos_px[:,:,:,2]<1e-9)
+    verts_pos_px[bgmask]=10
+
+    verts_pos0_px = torch.Tensor(np.meshgrid(range(bgmask.shape[2]), range(bgmask.shape[1]))).cuda()
+    verts_pos0_px[0] = verts_pos0_px[0]*2 / (bgmask.shape[2] - 1) - 1
+    verts_pos0_px[1] = verts_pos0_px[1]*2 / (bgmask.shape[1] - 1) - 1
+    verts_pos0_px = verts_pos0_px.permute(1,2,0)[None] 
+
+    flow_fw = (verts_pos_px[:,:,:,:2] - verts_pos0_px)
+    flow_fw[bgmask] = flow_fw[bgmask].detach()
+    return flow_fw, bgmask, fgmask
+
+
+def shade_coord(meshes, fragments,):
+    """
+    return: (N, H, W, K, D) 
+    """
+    verts = meshes.verts_packed()  # (V, 3)
+    faces = meshes.faces_packed()  # (F, 3)
+    faces_verts = verts[faces]
+    # print(verts.min(0), verts.max(0))
+    pixel_coords_in_camera = ops_3d.interpolate_face_attributes(
+        fragments.pix_to_face, fragments.bary_coords, faces_verts
+    )
+    # print(pixel_coords_in_camera.shape, pixel_coords_in_camera.reshape(-1, 3).min(0), pixel_coords_in_camera.reshape(-1, 3).max(0))
+    return pixel_coords_in_camera
+
+
+def render_mesh_flow_v2(wMesh_a: Meshes, wMesh_b: Meshes, c1Tw, c2Tw,  cam1: PerspectiveCameras, cam2:PerspectiveCameras, return_ndc=True, **kwargs):
+    """
+    cam1Meshes are in corespondence w cam2Meshes
+    """
+    device = wMesh_a.device
+    H = kwargs.get('out_size', 224)
+    c2Mesh_a = apply_transform(wMesh_a, c2Tw)
+    c2Mesh_b = apply_transform(wMesh_b, c2Tw)
+    
+    c2Mesh_b.textures = pad_texture(c2Mesh_b, c2Mesh_a.verts_padded())
+
+    raster_settings = kwargs.get('raster_settings',
+                                 RasterizationSettings(
+                                     image_size=H, 
+                                     faces_per_pixel=1,
+                                    perspective_correct=False,
+                                     cull_backfaces=False))
+    
+    rasterizer = MeshRasterizer(cameras=cam2, raster_settings=raster_settings).to(device)
+
+    out = {}
+    fragments = rasterizer(c2Mesh_b, **kwargs)
+    N, H, W = fragments.zbuf.shape[:3]
+
+    c2Image_a = shade_coord(c2Mesh_b, fragments)[..., 0, :]  # (N, H, W, 1)
+    is_background = fragments.pix_to_face[..., 0] < 0  # (N, H, W)
+    c2Image_a[is_background] = 1
+    # num_background_pixels = is_background.sum()
+    # pixel_colors = c2Image_a.masked_scatter(
+    #     is_background[..., None],
+    #     background_color[None, :].expand(num_background_pixels, -1),
+    # )  # (N, H, W, 3)
+
+
+    # c2Image_a   # (N, H, W, 3)
+    # project to image space
+    print(c2Image_a.max(), c2Image_a.min())
+    iImage_a = cam2.transform_points_ndc(c2Image_a.reshape(N, H**2, 3)).reshape(N, H, H, 3)  # (N, H, W, 3) in NDC
+    print(iImage_a.max(), iImage_a.min())
+    # flipped image
+    ys, xs = torch.meshgrid(
+        torch.linspace(1, -1, H),
+        torch.linspace(1, -1, W), indexing='ij'
+    )  # (H, W)
+    ys = ys.unsqueeze(0).expand(N, H, W).to(device)
+    xs = xs.unsqueeze(0).expand(N, H, W).to(device)
+    iImage_b = torch.stack([xs, ys], -1)
+
+    iflow_btoa = iImage_a[..., :2] - iImage_b  # (N, H, W, 2)
+    
+    iflow_btoa = torch.flip(iflow_btoa, dims=[1, 2])  # flip up-down, and left-right
+    iflow_btoa = iflow_btoa.permute(0, 3, 1, 2)
+    if not return_ndc:
+        iflow_btoa *= H / 2
+    out['flow'] = iflow_btoa
+    return out
+
+
+def render_mesh_flow(wMeshes1, wMeshes2, cam1: PerspectiveCameras, cam2: PerspectiveCameras,
         return_ndc=True, **kwargs):
     """
     Args:
@@ -369,9 +498,9 @@ def render_mesh_flow(wMeshes, cam1: PerspectiveCameras, cam2: PerspectiveCameras
 
     rasterizer = MeshRasterizer(cameras=cam1, raster_settings=raster_settings).to(device)
     if c1Tw is not None:
-        cam1Meshes = apply_transform(wMeshes, c1Tw)
+        cam1Meshes = apply_transform(wMeshes1, c1Tw)
     else:
-        cam1Meshes = wMeshes
+        cam1Meshes = wMeshes1
     out = {}
     fragments = rasterizer(cam1Meshes, **kwargs)
 
@@ -514,7 +643,7 @@ def render_mesh(meshes: Meshes, cameras,
                                      image_size=image_size, 
                                      faces_per_pixel=2,
                                      bin_size=kwargs.get('bin_size', 0),
-                                     cull_backfaces=False))
+                                     cull_backfaces=kwargs.get('cull_backfaces', False),))
     device = cameras.device
 
     rasterizer = MeshRasterizer(cameras=cameras, raster_settings=raster_settings).to(device)
@@ -1464,6 +1593,7 @@ def get_view_list(view_mod, device='cpu', time_len=21, **kwargs):
     view_dict = {
         'az': (0, np.pi * 2, 10 / 180 * np.pi),
         'el': (-np.pi / 2, np.pi / 2, 5 / 180 * np.pi),
+        'el0': (0, np.pi * 2, 10 / 180 * np.pi),
     }
     zeros = torch.zeros([time_len])
     if 'az' in view_mod:
@@ -1741,7 +1871,7 @@ def create_sdf_grid(bs, reso, lim, order='zyx', device='cpu'):
     return xyz
 
 
-def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=True, offset=None):
+def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=True, offset=None, N_up=None, extra=True):
     """transform to bSdf, for outside of the boundary, 
     set to sdf + eucidean distance to boundary
     assume voxels are in zyx(DHW) order
@@ -1749,16 +1879,19 @@ def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=True, 
     :param bTa: (B, 4, 4)
     : align_corners=True, which is consistent with marching cube but not the same as
     :return: bSdf: (B, 1, H, H, H) bXyz: (B, H, H, H, 3)
+    TODO: you need to do a Gaussian filter first.. 
     """
+    if N_up is None:
+        N_up = N
     B = len(aSdf)
     device = aSdf.device
     if order == 'zyx':
         aSdf = aSdf.transpose(-1, -3)
     
     d, h, w = torch.meshgrid(
-        torch.linspace(-lim, lim, N),
-        torch.linspace(-lim, lim, N),
-        torch.linspace(-lim, lim, N), 
+        torch.linspace(-lim, lim, N_up),
+        torch.linspace(-lim, lim, N_up),
+        torch.linspace(-lim, lim, N_up), 
         indexing='ij'
     )
     bXyz = torch.stack([w, h, d], dim=-1)  # (N, N, N, 3)
@@ -1775,8 +1908,13 @@ def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=True, 
     aTb = geom_utils.inverse_rt(mat=bTa, return_mat=True)
     aXyz = apply_transform(bXyz, aTb)  # (B, N**3, 3)
     # print(aXyz)
-    aXyz = aXyz.reshape(B, N, N, N, 3)  # (B, N, N, N, 3)
-    bSdf_in_a = F.grid_sample(aSdf, aXyz, 
+    aXyz = aXyz.reshape(B, N_up, N_up, N_up, 3)  # (B, N, N, N, 3)
+
+    # aSdf_pooled = F.adaptive_avg_pool3d(aSdf, size)
+    # print(size, aSdf_pooled.shape[-1], aSdf.shape[-1])
+    # aXyz = aXyz 
+    aSdf_pooled = aSdf
+    bSdf_in_a = F.grid_sample(aSdf_pooled, aXyz, 
         mode='bilinear', padding_mode='border', 
         align_corners=align_corners)
 
@@ -1785,19 +1923,47 @@ def transform_sdf_grid(aSdf, bTa, N=64, lim=2, order='zyx', align_corners=True, 
     bSdf_in_b = bSdf_in_a * bTa_scale[..., 0].reshape(B, 1, 1, 1, 1)
     
     # (B, N**3, 3). extra_dist is the l2-distance to rectantle [-1, 1]
-    extra_dist_in_a = (torch.abs(aXyz) - 1).clamp_(min=0)
-    extra_dist_in_a = (extra_dist_in_a**2).sum(dim=-1).sqrt()  # (N, D, H, W)
-    extra_dist = extra_dist_in_a * bTa_scale[..., 0].reshape(B, 1, 1, 1)
-    bSdf = bSdf_in_b + extra_dist.reshape(B, 1, N, N, N)
+    if extra:
+        extra_dist_in_a = (torch.abs(aXyz) - 1).clamp_(min=0)
+        extra_dist_in_a = (extra_dist_in_a**2).sum(dim=-1).sqrt()  # (N, D, H, W)
+        extra_dist = extra_dist_in_a * bTa_scale[..., 0].reshape(B, 1, 1, 1)
+        bSdf = bSdf_in_b + extra_dist.reshape(B, 1, N_up, N_up, N_up)
+    else:
+        bSdf = bSdf_in_b
 
-    # bSdf = bSdf_in_b
-    # print('extra dist', extra_dist)
+    bXyz = bXyz.reshape(B, N_up, N_up, N_up, 3)
+    
+    if N != N_up:
+        # subsample with maxpool
+        bSdf = -F.adaptive_max_pool3d(-bSdf, N)
+        
+        bXyz = rearrange(bXyz, 'b d h w c -> b c d h w')
+        bXyz = F.adaptive_avg_pool3d(bXyz, N)
+        bXyz = rearrange(bXyz, 'b c d h w -> b d h w c')
 
-    bXyz = bXyz.reshape(B, N, N, N, 3)
     if order == 'zyx':
         bSdf = bSdf.transpose(-1, -3)
         bXyz = bXyz.flip(-1) # x and z are flipped
     return bSdf, bXyz
+
+
+def meshes_to_sdf_grids(meshes: Meshes, half_size=1, N=64):
+    import mesh_to_sdf
+    os.environ['PYOPENGL_PLATFORM'] = 'egl'
+    bs = len(meshes)
+    xyz = create_sdf_grid(bs, N, half_size).cpu().numpy()
+
+    sdf_list = []
+    for b in range(bs):
+        vert = meshes.verts_list()[b].cpu().numpy()
+        face = meshes.faces_list()[b].cpu().numpy()
+        mesh = trimesh.Trimesh(vert, face)
+        sdf = mesh_to_sdf.mesh_to_sdf(mesh=mesh, query_points=xyz[b].reshape(-1, 3))
+        sdf = sdf.reshape(N, N, N)
+        sdf_list.append(sdf)
+    sdf = np.stack(sdf_list, axis=0)
+    sdf = torch.FloatTensor(sdf).to(meshes.device)
+    return sdf
 
 
 def batch_grid_to_meshes(sdf_values, batch_size, total_max_batch=32 ** 3, bound=False, half_size=1, **kwargs):
@@ -2276,7 +2442,7 @@ def sample_unit_cube(hObj, num_points, r=1):
 # for vhoi
 def render_hoi_obj_overlay(jHand, jObj, jTc=None, cTj=None, H=512, W=512, K_ndc=None, **kwargs):
     device = 'cuda:0'
-    jObj.textures = pad_texture(jObj, 'white')
+    jObj.textures = pad_texture(jObj, 'yellow')
     if jHand is not None:
         jHand.textures = pad_texture(jHand, 'blue')
         jMeshes = join_scene([jHand, jObj])
@@ -2299,7 +2465,7 @@ def render_hoi_obj_overlay(jHand, jObj, jTc=None, cTj=None, H=512, W=512, K_ndc=
 
 def render_hoi_obj(jHand, jObj, az, jTc=None, cTj=None, H=256, W=256, scale_geom=True, scale=10, **kwargs):
     if jObj is not None:
-        jObj.textures = pad_texture(jObj, 'white')
+        jObj.textures = pad_texture(jObj, 'yellow')
     if jHand is not None:
         if jObj is None:
             jMeshes = jHand
@@ -2412,3 +2578,4 @@ def get_wTcp_in_camera_view(az, wTc=None, cTw=None, return_wTc=True):
         wTcp = geom_utils.inverse_rt(mat=cpTw, return_mat=True)
         return wTcp
     return cpTw
+    

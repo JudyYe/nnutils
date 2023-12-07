@@ -51,6 +51,28 @@ def wrap_cmd(cmd):
         p.wait()
 
 
+
+#### config ####
+# cluster: slurm
+
+# slurm_signal_delay_s: 120
+# timeout_min: 2880 # 48 hours
+# slurm_partition: learnlab
+
+# slurm_mem_per_gpu: 40 # ${eval:'40*${ngpu}'}
+# gpus_per_node: ${ngpu}
+# tasks_per_node: ${ngpu}
+# cpus_per_task: 10
+# nodes: 1
+# slurm_max_num_timeout: 100
+
+
+# folder: ${exp_dir}/submitit_train_logs/
+# slurm_job_name: ${expname}
+# constraint: volta|volta32gb
+
+# exclude:
+
 def slurm_engine():
     def main_decorator(task_function):
         @functools.wraps(task_function)
@@ -203,6 +225,7 @@ def slurm_wrapper(args, save_dir, func, func_kwargs, resubmit=True, func_args=()
         with executor.batch():
             for _ in range(args.sl_node):
                 if resubmit:
+                    # job = executor.submit(Worker(), **{'func': func, 'args': func_args, 'kwargs': func_kwargs})
                     job = executor.submit(Worker(), **{'func': func, 'args': func_args, 'kwargs': func_kwargs})
                 else:
                     job = executor.submit(func, *func_args, **func_kwargs)
@@ -230,7 +253,7 @@ def add_slurm_args(arg_parser):
     arg_parser.add_argument("--sl_mem",default=None, type=int)  # 16 hrs
     arg_parser.add_argument("--sl_ngpu",default=1, type=int)
     arg_parser.add_argument("--sl_ntask_pnode",default=1, type=int)
-    arg_parser.add_argument("--sl_part",default='learnlab,devlab', type=str)
+    arg_parser.add_argument("--sl_part",default='devaccel,learnaccel,learnfair', type=str)
     return arg_parser
 
 
