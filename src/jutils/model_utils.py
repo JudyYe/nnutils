@@ -13,7 +13,7 @@ def get_obj_from_str(string: str, reload=False):
 
 
 def instantiate_from_config(config, **kwargs):
-    if not "target" in config:
+    if "target" not in config:
         if config == '__is_first_stage__':
             return None
         elif config == "__is_unconditional__":
@@ -22,15 +22,13 @@ def instantiate_from_config(config, **kwargs):
     return get_obj_from_str(config["target"])(**config.get("params", dict()), **kwargs)
 
 
-
-
 def load_from_checkpoint(ckpt, cfg_file=None, legacy=False, cfg=None):
     if cfg_file is None:
         cfg_file = ckpt.split('checkpoints')[0] + '/config.yaml'
     print('use cfg file', cfg_file)
     if cfg is None:
         cfg = OmegaConf.load(cfg_file)
-    print(cfg)
+    # print(OmegaConf.to_yaml(cfg))
     if 'resume_ckpt' in cfg.model:
         cfg.model.resume_ckpt = None  # save time to load base model :p
     # legacy issue
@@ -43,7 +41,8 @@ def load_from_checkpoint(ckpt, cfg_file=None, legacy=False, cfg=None):
         module = importlib.import_module(module)
         model_cls = getattr(module, model_name)
         model = model_cls(cfg, )
-        model.init_model()
+        if hasattr(model, 'init_model'):
+            model.init_model()
 
     print('loading from checkpoint', ckpt)    
     # import pdb; pdb.set_trace()

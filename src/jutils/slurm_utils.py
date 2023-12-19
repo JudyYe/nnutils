@@ -102,7 +102,8 @@ def slurm_engine():
                     'tasks_per_node': cfg.engine.tasks_per_node,
                     'slurm_job_name': cfg.engine.slurm_job_name,
                     'slurm_signal_delay_s': cfg.engine.slurm_signal_delay_s,
-                    'slurm_mem_per_gpu': cfg.engine.slurm_mem_per_gpu,
+                    # 'slurm_mem_per_gpu': cfg.engine.slurm_mem_per_gpu,
+                    # 'slurm_mem': cfg.engine.slurm_mem_per_gpu * cfg.engine.gpus_per_node,
                 }
                 init_params = {
                     "cluster": cfg.engine.cluster,
@@ -246,14 +247,14 @@ def add_slurm_args(arg_parser):
     arg_parser.add_argument("--sl_time",default=48, type=int, help='timeout in hours')  # in ours hrs
     arg_parser.add_argument("--sl_name", default='dev', type=str)  
     arg_parser.add_argument("--sl_gpu_mem_gb", default=None, type=str)  
-    arg_parser.add_argument("--sl_dir", default='/private/home/yufeiy2/slurm_cache_shot', type=str)  
+    arg_parser.add_argument("--sl_dir", default='/home/yufeiy2/slurm_cache_shot', type=str)  
     arg_parser.add_argument("--sl_work",default=10, type=int)
     arg_parser.add_argument("--sl_node",default=1, type=int)  # 16 hrs
     arg_parser.add_argument("--sl_nodelist",default=None, type=str)  # 16 hrs
     arg_parser.add_argument("--sl_mem",default=None, type=int)  # 16 hrs
     arg_parser.add_argument("--sl_ngpu",default=1, type=int)
     arg_parser.add_argument("--sl_ntask_pnode",default=1, type=int)
-    arg_parser.add_argument("--sl_part",default='devaccel,learnaccel,learnfair', type=str)
+    arg_parser.add_argument("--sl_part",default='abhinav,shubham,abhinavlong,shubhamlong', type=str)
     return arg_parser
 
 

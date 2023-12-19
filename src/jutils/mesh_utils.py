@@ -18,7 +18,8 @@ import skimage.measure
 from pytorch3d.renderer.lighting import AmbientLights
 from pytorch3d.renderer.mesh.shader import HardPhongShader, SoftPhongShader
 from scipy.spatial.distance import cdist
-from torch._six import string_classes
+# from torch._six import string_classes
+string_classes = str
 
 int_classes = int
 np_str_obj_array_pattern = re.compile(r'[SaUO]')
