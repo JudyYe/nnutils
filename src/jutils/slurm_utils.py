@@ -117,6 +117,8 @@ def slurm_engine():
                         additional_parameters[k] = v
                 if additional_parameters['exclude'] is None:
                     additional_parameters.pop('exclude')
+                else:
+                    additional_parameters['exclude'] = additional_parameters['exclude'].replace('+', ',')
 
                 executor.update_parameters(**params)
                 executor.update_parameters(slurm_additional_parameters=additional_parameters)
@@ -227,7 +229,7 @@ def slurm_wrapper(args, save_dir, func, func_kwargs, resubmit=True, func_args=()
             for _ in range(args.sl_node):
                 if resubmit:
                     # job = executor.submit(Worker(), **{'func': func, 'args': func_args, 'kwargs': func_kwargs})
-                    job = executor.submit(Worker(), **{'func': func, 'args': func_args, 'kwargs': func_kwargs})
+                    job = executor.submit(Worker(), func, *func_args, **func_kwargs) # **{'func': func, 'args': func_args, 'kwargs': func_kwargs})
                 else:
                     job = executor.submit(func, *func_args, **func_kwargs)
                 # print('run job in ', save_dir, job.job_id)

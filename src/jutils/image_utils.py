@@ -806,6 +806,16 @@ def write_gif(image_list, gif_name, fps=10):
     print('save to ', gif_name + '.gif')
 
 
+def ffmepg(src_dir, mp4_file, ffmpeg = "/home/yufeiy2/.local/bin/ffmpeg", fps=30, clear=True):
+    if osp.exists(mp4_file):
+        os.system('rm %s' % mp4_file)
+    cmd = ffmpeg + f" -framerate {fps} -i {src_dir} -c:v libx264 -pix_fmt yuv420p {mp4_file}" 
+    cmd += " -hide_banner -loglevel error"
+    print(cmd)
+    os.system(cmd)
+    if clear:
+        os.system(f'rm -r {osp.dirname(src_dir)}')
+
 def write_mp4(video, save_file, pref_ffmpeg='~/.local/bin/'):
     tmp_dir = save_file + '.tmp'
     os.makedirs(tmp_dir, exist_ok=True)

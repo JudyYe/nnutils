@@ -165,6 +165,35 @@ def dump_voxes(filepath, voxels):
         np.savez_compressed(filepath[n] + '.npz', vox=voxels[n, 0])
 
 
+def dump_meshes_w_textures(mesh_path, meshes: Meshes, ext='.obj', verbose=True):
+    N = len(meshes)
+    if isinstance(mesh_path, str):
+        mesh_prefix = mesh_path
+        mesh_path = [mesh_prefix + '_%02d' % n for n in range(N)]
+    elif isinstance(mesh_path, list):
+        assert len(mesh_path) == len(meshes)
+
+    meshes = meshes.to('cpu')
+
+    if N == 0:
+        print('skip empty meshes')
+        return
+    if verbose:
+        print('save meshes to ', mesh_path[0])
+
+    for n in range(N):
+        os.makedirs(os.path.dirname(mesh_path[n]), exist_ok=True)
+        verts = meshes.verts_list()[n].cpu().numpy()
+        faces = meshes.faces_list()[n].cpu().numpy()
+        if meshes.textures is not None:
+            textures = meshes.textures.verts_features_list()[n].cpu().numpy()
+        else:
+            textures = None
+
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces, vertex_colors=textures)
+        mesh.export(mesh_path[n] + ext)
+
+
 def dump_meshes(mesh_path, meshes: Meshes, ext='.obj', verbose=True):
     """
     :param mesh_path: str or list of str

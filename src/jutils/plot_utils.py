@@ -332,7 +332,7 @@ def pc_to_cubic_meshes(xyz: torch.Tensor = None, feature: torch.Tensor = None, p
 
         verts = cube_verts.expand(N, 8, 3) + torch.randn([N, 8, 3], device=device) * 0.01  # (1, 8, 3)
         verts = pc.points_padded().unsqueeze(-2) + (verts * eps).unsqueeze(1)  # N, 8, 3  -> N, V, 8, 3
-        verts = verts.view(N, V * 8, 3)
+        verts = verts.reshape(N, V * 8, 3)
 
         num8_list = (num * 8).tolist()
         verts_list = struct_utils.padded_to_list(verts, num8_list)

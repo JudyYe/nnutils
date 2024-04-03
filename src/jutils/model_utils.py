@@ -2,6 +2,7 @@ import importlib
 from omegaconf import OmegaConf
 import logging
 import torch
+from typing import NamedTuple
 
 
 def get_obj_from_str(string: str, reload=False):
@@ -103,6 +104,9 @@ def to_cuda(data, device='cuda'):
     elif isinstance(data, dict):
         for k, v in data.items():
             data[k] = to_cuda(v, device)
+    elif isinstance(data, NamedTuple):
+        data = data.__class__(*(to_cuda
+                                (d, device) for d in data))
     elif isinstance(data, tuple):
         data = tuple(to_cuda(d, device) for d in data)
     return data

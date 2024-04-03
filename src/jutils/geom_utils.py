@@ -12,16 +12,22 @@ import pytorch3d.transforms.rotation_conversions as rot_cvt
 from pytorch3d.transforms import Transform3d, Rotate, Translate, Scale
 from pytorch3d.renderer.cameras import look_at_rotation, look_at_view_transform
 
-def project_back_to_rot(homo):
+def project_back_to_rot(mat):
     """
     :param rot: (..., 3, 3)
     :return: (..., 3, 3)
     """
-    rot, tsl, scale = homo_to_rt(homo)
+    if mat.size(-1) == 4:
+        rot, tsl, scale = homo_to_rt(mat)
+    else:
+        rot = mat
     u, _, v = torch.svd(rot)
     rot = torch.matmul(u, v.transpose(1, 2))
 
-    mat = rt_to_homo(rot, tsl, scale)
+    if mat.size(-1) == 4:
+        mat = rt_to_homo(rot, tsl, scale)
+    else:
+        mat = rot
     return mat
 
 
