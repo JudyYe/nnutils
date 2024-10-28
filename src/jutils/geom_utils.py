@@ -62,25 +62,32 @@ def scale_matrix(scale, homo=True):
     return mat
 
 
-def se3_to_matrix(param: torch.Tensor):
+def se3_to_matrix(param: torch.Tensor, include_scale=True):
     """
     :param param: tensor in shape of (..., 10) rotation param (6) + translation (3) + scale (1)
     :return: transformation matrix in shape of (N, 4, 4) sR+t
     """
-    rot6d, trans, scale = torch.split(param, [6, 3, 3], dim=-1)
+    if include_scale:
+        rot6d, trans, scale = torch.split(param, [6, 3, 3], dim=-1)
+    else:
+        rot6d, trans = torch.split(param, [6, 3], dim=-1)
+        scale = torch.ones_like(trans)
     rot = rotation_6d_to_matrix(rot6d)  # N, 3, 3
     mat = rt_to_homo(rot, trans, scale)    
     return mat
 
 
-def matrix_to_se3(mat: torch.Tensor) -> torch.Tensor:
+def matrix_to_se3(mat: torch.Tensor, rtn_scale=True) -> torch.Tensor:
     """
     :param mat: transformation matrix in shape of (N, 4, 4)
     :return: tensor in shape of (N, 9) rotation param (6) + translation (3)
     """
     rot, trans, scale = homo_to_rt(mat)
     rot = matrix_to_rotation_6d(rot)
-    se3 = torch.cat([rot, trans, scale], dim=-1)
+    if rtn_scale:
+        se3 = torch.cat([rot, trans, scale], dim=-1)
+    else:
+        se3 = torch.cat([rot, trans], dim=-1)
     return se3
 
 
@@ -184,14 +191,18 @@ def rt_to_homo(rot=None, t=None, s=None):
     return mat
 
 
-def homo_to_rt(mat):
+def homo_to_rt(mat, ignore_scale=False):
     """
     :param (N, 4, 4) [R, t; 0, 1]
     :return: rot: (N, 3, 3), t: (N, 3), s: (N, 3)
     """
     mat, _ = torch.split(mat, [3, mat.size(-2) - 3], dim=-2)
     rot_scale, trans = torch.split(mat, [3, 1], dim=-1)
-    rot, scale = mat_to_scale_rot(rot_scale)
+    if ignore_scale:
+        rot = rot_scale
+        scale = None
+    else:
+        rot, scale = mat_to_scale_rot(rot_scale)
 
     trans = trans.squeeze(-1)
     return rot, trans, scale
@@ -296,6 +307,23 @@ def jitter_se3(se3, rot_stddev, t_stddev, s_stddev=0):
     dst_mat = torch.matmul(mat, delta_mat)
     dst_se3 = matrix_to_se3(dst_mat)
     return dst_se3, delta_mat
+
+
+def inverse_rt_v2(mat=None, return_mat=True, ignore_scale=True):
+    """
+    [R, t] --> [R.T, -R.T + t]
+    :param se3:
+    :param mat:
+    :param return_mat:
+    :return
+    """
+    rot, trans, _ = homo_to_rt(mat, ignore_scale=ignore_scale)
+    inv_mat = rt_to_homo(rot.transpose(-1, -2),  
+        (-rot.transpose(-1, -2)) @ trans.unsqueeze(-1))
+    if return_mat:
+        return inv_mat
+    else:
+        return matrix_to_se3(inv_mat)
 
 
 def inverse_rt(se3=None, mat=None, return_mat=False):

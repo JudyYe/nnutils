@@ -117,7 +117,7 @@ def get_mean_pose(model='mano', tensor=True, device='cpu'):
 
 
 class ManopthWrapper(nn.Module):
-    def __init__(self, mano_path='/home/yufeiy2/scratch/pretrain/smpl/mano_v1_2/models', side='right', **kwargs):
+    def __init__(self, mano_path='/is/cluster/fast/yye/pretrain/body_models/mano_v1_2/models', side='right', **kwargs):
         super().__init__()
         self.mano_layer_right = ManoLayer(
             mano_root=mano_path, side=side, 
@@ -499,7 +499,10 @@ def get_offset(axisang):
     N = axisang.size(0)
     t_mano = torch.tensor([[0.09566994, 0.00638343, 0.0061863]], dtype=torch.float32, device=device).repeat(N, 1)
     # t_r = torch.tensor([[0.09988064, 0.01178287,  -0.01959994]], dtype=torch.float32, device=device).repeat(N, 1)
-    rot_r = geom_utils.axis_angle_t_to_matrix(axisang, homo=False)  # N, 3, 3
+    if axisang.ndim == 3:
+        rot_r = axisang
+    else:
+        rot_r = geom_utils.axis_angle_t_to_matrix(axisang, homo=False)  # N, 3, 3
     delta = t_mano - torch.matmul(rot_r, t_mano.unsqueeze(-1)).squeeze(-1)
     return delta
 

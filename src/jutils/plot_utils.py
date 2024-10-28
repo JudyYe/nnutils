@@ -135,8 +135,12 @@ def create_line(x1, x2, width=None):
     happy = torch.zeros([N, ], device=device, dtype=torch.bool)
     for i in range(10):
         rand = F.normalize(torch.randn_like(e1))
-        r[~happy] = rand
+        # print(f"{i} ", rand.shape, e1.shape, r.shape, happy.shape)
+        # r[~happy] = rand
+        r = torch.where(happy.unsqueeze(-1).repeat(1, 3), r, rand)
         happy = torch.linalg.vector_norm(torch.cross(r, e1, -1), dim=-1).abs() > 1e-6
+        # also put to 0 if happy is nan
+        happy = happy & ~torch.isnan(happy)
         if torch.all(happy):
             break
     if not torch.all(happy):

@@ -928,7 +928,7 @@ def get_nTw(geom: Meshes, new_center=None, new_scale=1):
     device = geom.device
     verts = get_verts(geom)  # (N, V, 3)
     # if verts are empty
-    if geom.isempty():
+    if isinstance(geom, Meshes) and geom.isempty():
         nTw = torch.eye(4, device=device)[None].repeat(len(geom), 1, 1)
         return nTw
     # get bounding bbox
@@ -1446,9 +1446,13 @@ def extr_between_opengl_to_py3d(cTw=None, wTc=None):
 
 def intr_from_ndc_to_screen(ndc_intr, H, W):
     """-1, 1 --> 0, H, it's essentially affine transformation.... 
+    :param ndc_intr: (N, 4, 4)
     """
     N = len(ndc_intr)
     device = ndc_intr.device
+    dim_h, dim_w = ndc_intr.shape[-2:]
+    if dim_h == 3 and dim_w == 3:
+        ndc_intr = geom_utils.rt_to_homo(ndc_intr)
     scale_mat = torch.FloatTensor([[
         [W/2, 0, W/2, 0],
         [0, H/2, H/2, 0],
@@ -1456,12 +1460,15 @@ def intr_from_ndc_to_screen(ndc_intr, H, W):
         [0, 0, 0, 1],
     ]]).to(device).repeat(N, 1, 1)
     pix_intr = scale_mat @ ndc_intr
+    pix_intr = pix_intr[..., 0:dim_h, 0:dim_w]
     return pix_intr
 
 
 def intr_from_screen_to_ndc(pix_intr, H, W):
     """0,H --> -1, 1"""
-    N = len(pix_intr)
+    shape = pix_intr.shape[:-2]
+    one_shape = (1, ) * len(shape)
+    # N = len(pix_intr)
     device = pix_intr.device
     dim_h, dim_w = pix_intr.shape[-2:]
     if dim_h == 3 and dim_w == 3:
@@ -1474,7 +1481,7 @@ def intr_from_screen_to_ndc(pix_intr, H, W):
         [0, 2/H, -1, 0],
         [0, 0, 1, 0],
         [0, 0, 0, 1],
-    ]]).to(device).repeat(N, 1, 1)
+    ]]).to(device).reshape(*one_shape, 4, 4).expand(*shape, 4, 4)
     ndc_intr = scale_mat @ pix_intr
 
     ndc_intr = ndc_intr[..., 0:dim_h, 0:dim_w]

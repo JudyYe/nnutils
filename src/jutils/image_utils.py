@@ -757,7 +757,7 @@ def save_depth(images, fname, text_list=[None], merge=1, col=8, scale=False, zne
     else:
         return merge_image
 
-def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  fps=10):
+def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  fps=10, max_size=512):
     """
     :param image_list: [(N, C, H, W), ] * T
     :param fname:
@@ -780,6 +780,12 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  
         for t in range(T):
             time_slices = tensor_text_to_canvas(tensor_list[t], batch_text[t], col=col,
                                                 scale=scale)  # numpy (H, W, C) of uint8
+            
+            if max_size is not None:
+                H, W = time_slices.shape[:2]
+                if H > max_size or W > max_size:
+                    fx = max_size / max(H, W)
+                    time_slices = cv2.resize(time_slices, (0, 0), fx=fx, fy=fx)
             image_list.append(time_slices)
         # write_mp4(image_list, gif_name)
         write_gif(image_list, gif_name, fps=fps)
@@ -802,7 +808,7 @@ def write_gif(image_list, gif_name, fps=10):
         os.makedirs(os.path.dirname(gif_name))
         print('## Make directory: %s' % gif_name)
     # imageio.mimsave(gif_name + '.gif', image_list, duration=len(image_list)/fps)
-    imageio.mimsave(gif_name + '.gif', image_list, fps=fps)
+    imageio.mimsave(gif_name + '.gif', image_list, fps=fps, loop=0)
     print('save to ', gif_name + '.gif')
 
 
@@ -913,7 +919,10 @@ def vis_pts(image_tensor, pts, color=(0, 1, 0), normed=True, subset=-1):
         pts = pts.cpu().detach().numpy()
     N, H, W, _ = image_tensor.shape
     if normed:
-        pts = (pts + 1) / 2 * np.array([[[W, H]]])
+        pts = (pts + 1) / 2 
+        pts[..., 0] *= W
+        pts[..., 1] *= H
+        # * np.array([[[W, H]]])
     image_list = []
     for n in range(N):
         image = image_tensor[n].copy()
