@@ -1044,8 +1044,8 @@ def render_geom_rot_v2(wGeom: Union[Meshes, Pointclouds],
                 nTw = get_nTw(geom, new_scale=new_bound)
             else:
                 nTw = torch.eye(4)[None].repeat(N, 1, 1).to(device)
-    else:
-        raise NotImplementedError('todo')
+    # else:
+    #     raise NotImplementedError('todo')
     
     dist = f * new_bound / r
     cTw_list = get_cTw_list(dist, view_mod, time_len, nTw=nTw)

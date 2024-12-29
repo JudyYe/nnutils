@@ -757,7 +757,7 @@ def save_depth(images, fname, text_list=[None], merge=1, col=8, scale=False, zne
     else:
         return merge_image
 
-def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  fps=10, max_size=512):
+def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  fps=10, max_size=512, ext='.gif'):
     """
     :param image_list: [(N, C, H, W), ] * T
     :param fname:
@@ -787,15 +787,19 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  
                     fx = max_size / max(H, W)
                     time_slices = cv2.resize(time_slices, (0, 0), fx=fx, fy=fx)
             image_list.append(time_slices)
-        # write_mp4(image_list, gif_name)
-        write_gif(image_list, gif_name, fps=fps)
+        if gif_name is None:
+            return image_list
+        if ext == '.mp4':
+            write_mp4(image_list, gif_name)
+        else:
+            write_gif(image_list, gif_name, fps=fps)
     # merge write
     if len(image_list) == 0:
         print('not save empty gif list')
         return
     num = image_list[0].size(0)
     if merge >= 1:
-        write_to_gif(fname, image_list, text_list, col=min(col, num), scale=scale)
+        return write_to_gif(fname, image_list, text_list, col=min(col, num), scale=scale)
     if merge == 0 or merge == 2:
         for n in range(num):
             os.makedirs(fname, exist_ok=True)

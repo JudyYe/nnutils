@@ -12,6 +12,20 @@ import pytorch3d.transforms.rotation_conversions as rot_cvt
 from pytorch3d.transforms import Transform3d, Rotate, Translate, Scale
 from pytorch3d.renderer.cameras import look_at_rotation, look_at_view_transform
 
+def q7_to_mat(qs):
+    tsl, quat = qs[..., :3], qs[..., 3:]
+    rot = rot_cvt.quaternion_to_matrix(quat)
+    mat = rt_to_homo(rot, tsl)
+    return mat
+
+
+def mat_to_q7(mat): 
+    rot, tsl, _ = homo_to_rt(mat, ignore_scale=True)
+    quat = rot_cvt.matrix_to_quaternion(rot)
+    qs = torch.cat([tsl, quat], -1)
+    return qs
+
+
 def project_back_to_rot(homo):
     """
     :param rot: (..., 3, 3)
