@@ -91,7 +91,7 @@ def se3_to_matrix(param: torch.Tensor, include_scale=True):
     return mat
 
 
-def matrix_to_se3(mat: torch.Tensor, rtn_scale=True) -> torch.Tensor:
+def matrix_to_se3(mat: torch.Tensor, rtn_scale=False) -> torch.Tensor:
     """
     :param mat: transformation matrix in shape of (N, 4, 4)
     :return: tensor in shape of (N, 9) rotation param (6) + translation (3)

@@ -789,10 +789,10 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  
             image_list.append(time_slices)
         if gif_name is None:
             return image_list
-        if ext == '.mp4':
-            write_mp4(image_list, gif_name)
-        else:
-            write_gif(image_list, gif_name, fps=fps)
+        # if ext == '.mp4':
+        #     write_mp4(image_list, gif_name)
+        # else:
+        write_gif(image_list, gif_name, fps=fps, ext=ext)
     # merge write
     if len(image_list) == 0:
         print('not save empty gif list')
@@ -807,13 +807,16 @@ def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  
             write_to_gif(os.path.join(fname, '%d' % n), single_list, [text_list[n]], col=1, scale=scale)
 
 
-def write_gif(image_list, gif_name, fps=10):
+def write_gif(image_list, gif_name, fps=10, ext='.gif'):
     if not os.path.exists(os.path.dirname(gif_name)):
         os.makedirs(os.path.dirname(gif_name))
         print('## Make directory: %s' % gif_name)
     # imageio.mimsave(gif_name + '.gif', image_list, duration=len(image_list)/fps)
-    imageio.mimsave(gif_name + '.gif', image_list, fps=fps, loop=0)
-    print('save to ', gif_name + '.gif')
+    if ext == '.mp4':
+        imageio.mimsave(gif_name + ext, image_list, fps=fps)
+    else:
+        imageio.mimsave(gif_name + ext, image_list, fps=fps, loop=0)
+    print('save to ', gif_name + ext)
 
 
 def write_mp4(video, save_file, pref_ffmpeg='~/.local/bin/'):

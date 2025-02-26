@@ -275,7 +275,7 @@ def create_camera(device, N, size=0.2, focal=1., cam_type='+z'):
     return verts, faces
     
 
-def vis_cam(wTc=None, cTw=None, color='white', cam_type='+z', size=None, focal=1):
+def vis_cam(wTc=None, cTw=None, color='white', cam_type='+z', size=None, focal=1, homo=False):
     """visualize camera 
     return a List of Meshes, each is a camera mesh in world coordinate
     :param wTc: camera coord to world coord in shape of (4, 4), can have scale, defaults to None
@@ -296,7 +296,8 @@ def vis_cam(wTc=None, cTw=None, color='white', cam_type='+z', size=None, focal=1
     cam_verts, cam_faces = create_camera(device, N, size=size, focal=focal, cam_type=cam_type)  # (N, Vcam, 3)
     wTc = Transform3d(matrix=wTc.transpose(-1, -2))
     wCam_verts = wTc.transform_points(cam_verts)
-
+    if homo:
+        return wCam_verts, cam_faces
     mesh_list = []
     for n in range(N):
         m = Meshes([wCam_verts[n]], [cam_faces[n]])
