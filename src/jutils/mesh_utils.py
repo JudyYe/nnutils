@@ -55,7 +55,9 @@ from pytorch3d.transforms import (Rotate, Scale, Transform3d, Translate,
 from einops import rearrange
 from . import geom_utils
 from .layers import grid_sample
-from .my_pytorch3d import Meshes, chamfer_distance, BatchedNDCMultinomialRaysampler
+# from .my_pytorch3d import Meshes, chamfer_distance, BatchedNDCMultinomialRaysampler
+from .my_pytorch3d import chamfer_distance, BatchedNDCMultinomialRaysampler
+from pytorch3d.structures import Meshes
 
 
 # ### Mesh IO Utils ###
@@ -246,7 +248,7 @@ def get_color(color='white', device='cpu'):
         'red': [254,216/2,183/2],
         'yellow': [240, 207, 192], 
     }
-    if isinstance(color, 'str'):
+    if isinstance(color, str):
         feature = torch.FloatTensor(color255_dict[color]).reshape(1, 1, 3) / 255
     elif not torch.is_tensor(color):
         feature = torch.FloatTensor(color).reshape(1, 1, 3) / 255

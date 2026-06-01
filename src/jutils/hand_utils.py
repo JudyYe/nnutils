@@ -117,7 +117,7 @@ def get_mean_pose(model='mano', tensor=True, device='cpu'):
 
 
 class ManopthWrapper(nn.Module):
-    def __init__(self, mano_path='/is/cluster/fast/yye/pretrain/body_models/mano_v1_2/models', side='right', **kwargs):
+    def __init__(self, mano_path='/move/u/yufeiy2/pretrain/body_models/mano_v1_2/models', side='right', **kwargs):
         super().__init__()
         self.mano_layer_right = ManoLayer(
             mano_root=mano_path, side=side, 

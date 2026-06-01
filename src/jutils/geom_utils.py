@@ -76,6 +76,21 @@ def scale_matrix(scale, homo=True):
     return mat
 
 
+def se3_to_matrix_v2(param: torch.Tensor):
+    xyz, rot6d = torch.split(param, [3, 6], dim=-1)
+    rot = rotation_6d_to_matrix(rot6d)
+    mat = rt_to_homo(rot, xyz)
+    return mat
+
+
+def matrix_to_se3_v2(mat: torch.Tensor):
+    rot = mat[..., :3, :3]
+    tsl = mat[..., :3, 3]
+    rot6d = matrix_to_rotation_6d(rot)
+    param = torch.cat([tsl, rot6d], dim=-1)
+    return param
+
+
 def se3_to_matrix(param: torch.Tensor, include_scale=True):
     """
     :param param: tensor in shape of (..., 10) rotation param (6) + translation (3) + scale (1)

@@ -760,6 +760,7 @@ def save_depth(images, fname, text_list=[None], merge=1, col=8, scale=False, zne
 def save_gif(image_list, fname, text_list=[None], merge=1, col=8, scale=False,  fps=10, max_size=512, ext='.gif'):
     """
     :param image_list: [(N, C, H, W), ] * T
+    :param text_list: [str, ] * T
     :param fname:
     :return:
     """

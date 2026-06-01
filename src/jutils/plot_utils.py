@@ -146,8 +146,10 @@ def create_line(x1, x2, width=None):
     if not torch.all(happy):
         print(e1, r, )
         print('!!!! Warning! Cannot find a vector to orthogonize')
-    e2 = torch.cross(e1, r)
-    e3 = torch.cross(e1, e2)
+    e2 = torch.linalg.cross(e1, r)
+    # e2 = torch.cross(e1, r)
+    e3 = torch.linalg.cross(e1, e2)
+    # e3 = torch.cross(e1, e2)
     rot = Rotate(torch.stack([e1, e2, e3], dim=1), device=device) # seems R is the transposed rot / or row-vector
     # X -> scale -> R -> t, align
     transform = scale.compose(rot, translate)

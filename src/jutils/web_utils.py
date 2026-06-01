@@ -8,8 +8,14 @@ import os
 import os.path as osp
 import shutil
 
+from markupsafe import Markup
+import flask
+flask.Markup = Markup  # patch old dependency
+
 from flask_table import Col, create_table
-from flask import Markup
+# from flask import Markup
+from markupsafe import Markup
+
 import argparse
 from . import mesh_utils
 
@@ -24,7 +30,7 @@ def parse_args():
     return args
 
 
-def run(html_root, cell_list, width=200, hide_text=False, height=None, inplace=False):
+def run(html_root, cell_list, width=200, hide_text=False, height=None, inplace=False, add_prefix=False):
     """
     cell_list: 2D array, each element could be: filepath of vid/image, str
     """
@@ -45,7 +51,7 @@ def run(html_root, cell_list, width=200, hide_text=False, height=None, inplace=F
     for r, row in enumerate(cell_list):
         line = {}
         for c in range(ncol):
-            pref = 'r%02dc%02d' % (r, c)
+            pref = 'r%02dc%02d_' % (r, c) if add_prefix else ''
             line['%d' % c] = html_add_col_text(row[c], html_root, width, pref, hide_text, height=height, inplace=inplace)
         items.append(line)
     table = TableCls(items)
@@ -67,10 +73,14 @@ def html_add_col_text(src_file, vis_dir, width, pref, hide_text=False, height=No
     """
     if height is None:
         size = 'width="%d"' % width
+        vid_size = 'width="%d"' % width
     else:
         size = 'height="%d"' % height
+        # Set height and explicitly force width to auto to maintain aspect ratio and prevent cropping
+        # The video will be exactly the specified height, with width scaling to preserve aspect ratio
+        vid_size = 'height="%d" style="width: auto; max-width: none; min-width: 0;"' % height
     img_temp = '<a href="{0}"><img src="{0}" %s> </a> <br/> {0} <br/>' % size
-    vid_temp = '<video playsinline controls autoplay muted loop  %s ><source src="{0}" type="video/mp4"></video> <br/> {0} <br/>' % size
+    vid_temp = '<video playsinline controls autoplay muted loop %s><source src="{0}" type="video/mp4"></video> <br/> {0} <br/>' % vid_size
     mesh_temp = '<model-viewer src="{0}" style="width:%d" shadow-intensity="1" camera-controls="" auto-rotate="" ar="" ar-status="not-presenting"></model-viewer>' % width
     if hide_text:
         img_temp = img_temp.split('<br/>')[0]
@@ -81,18 +91,18 @@ def html_add_col_text(src_file, vis_dir, width, pref, hide_text=False, height=No
         ext = src_file.split('.')[-1]
         if ext in ['mp4']:
             temp = vid_temp
-            dst_file = os.path.join(vis_dir, '%s_%s' % (pref, os.path.basename(src_file)))
+            dst_file = os.path.join(vis_dir, '%s%s' % (pref, os.path.basename(src_file)))
             if not inplace: shutil.copyfile(src_file, dst_file)
         elif ext in ['png', 'gif', 'jpg', 'jpeg']:
             temp = img_temp
-            dst_file = os.path.join(vis_dir, '%s_%s' % (pref, os.path.basename(src_file)))
+            dst_file = os.path.join(vis_dir, '%s%s' % (pref, os.path.basename(src_file)))
             if not inplace: shutil.copyfile(src_file, dst_file)
         elif ext in ['obj', 'ply', 'glb']:
             temp = mesh_temp
-            dst_file = os.path.join(vis_dir, '%s_%s' % (pref, os.path.basename(src_file)[:-3] + 'glb'))
+            dst_file = os.path.join(vis_dir, '%s%s' % (pref, os.path.basename(src_file)[:-3] + 'glb'))
             mesh_utils.meshfile_to_glb(src_file, dst_file)
         else:
-            dst_file = os.path.join(vis_dir, '%s_%s' % (pref, os.path.basename(src_file)))
+            dst_file = os.path.join(vis_dir, '%s%s' % (pref, os.path.basename(src_file)))
             if not inplace: shutil.copyfile(src_file, dst_file)
         if inplace: dst_file = src_file
         col_text += temp.format(os.path.basename(dst_file))
