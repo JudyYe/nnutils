@@ -588,7 +588,7 @@ def render_pc(point_clouds: Pointclouds, cameras, out_size=224, **kwargs):
     # and blur_radius=0.0. Refer to raster_points.py for explanations of these parameters. 
     raster_settings = PointsRasterizationSettings(
         image_size=out_size, 
-        radius = 2/out_size,
+        radius = kwargs.get('radius', 2/out_size),
         points_per_pixel = kwargs.get('points_per_pixel', 10),
         
     )
@@ -656,7 +656,9 @@ def render_mesh(meshes: Meshes, cameras,
     out['frag'] = fragments
 
     if rgb_mode:
-        shader = kwargs.get('shader', HardPhongShader(device=meshes.device, lights=ambient_light(meshes.device, cameras, **kwargs)))
+        shader = kwargs.get('shader', HardPhongShader(
+            device=meshes.device, 
+            lights=kwargs.get("light", ambient_light(meshes.device, cameras, **kwargs))))
         image = shader(fragments, meshes, cameras=cameras, **kwargs)  # znear=znear, zfar=zfar, **kwargs)
         rgb, _ = flip_transpose_canvas(image)
 
